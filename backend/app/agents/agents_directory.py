@@ -28,9 +28,13 @@ gemini_3_1 = GoogleModel(model_name="gemini-3.1-flash-lite", provider=google_pro
 liquid_ai_lfm = OpenRouterModel(
     model_name="liquid/lfm-2.5-2.6b:free", provider=openrouter_provider
 )
+nemotron_3_ultra = OpenAIChatModel(
+    model_name="nvidia/nemotron-3-ultra-550b-a55b", provider=nvidia_provider
+)
 
-agents_mapper = {
+agent_mapper = {
     "laguna-xs-2.1": laguna,
     "gemini-3.1-flash-lite": gemini_3_1,
     "lfm-2.5-2.6b": liquid_ai_lfm,
+    "nemotron-3-ultra-550b-a55b": nemotron_3_ultra,
 }

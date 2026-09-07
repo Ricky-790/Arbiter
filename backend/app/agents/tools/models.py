@@ -1,0 +1,36 @@
+"""Models shared by the agent tool layer."""
+
+from enum import IntEnum
+from typing import Any
+
+from pydantic import BaseModel, Field
+
+
+class ToolCost(IntEnum):
+    """Credit costs exposed as tool metadata; tools never deduct them."""
+
+    BASH = 2
+    WATCH_FILE = 3
+    WATCH_PROCESS = 4
+    KILL_PROCESS = 5
+    AUTO_KILL = 15
+    BLOCK_NETWORK = 8
+    SUBMIT_FLAG = 0
+    PASS = 0
+
+
+class ToolCall(BaseModel):
+    """An agent's requested capability and LLM-controlled arguments."""
+
+    name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolResult(BaseModel):
+    """The safe, structured result returned from an attempted tool action."""
+
+    success: bool
+    output: str = ""
+    error: str | None = None
+    exit_code: int | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)

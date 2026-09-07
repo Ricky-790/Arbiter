@@ -1,0 +1,30 @@
+"""Boundary between declarative agent tools and sandbox/game execution.
+
+The future Engine supplies a per-action context implementing this protocol.
+Tools must not construct a SandboxManager or know a match identifier.
+"""
+
+from typing import Protocol, runtime_checkable
+
+from .models import ToolResult
+
+
+@runtime_checkable
+class ToolExecutionContext(Protocol):
+    async def run_command(self, *, command: str) -> ToolResult: ...
+
+    async def watch_file(self, *, path: str) -> ToolResult: ...
+
+    async def watch_process(self, *, process: str) -> ToolResult: ...
+
+    async def kill_process(self, *, pid: int) -> ToolResult: ...
+
+    async def auto_kill(self, *, process: str) -> ToolResult: ...
+
+    async def block_network(
+        self, *, ip: str | None = None, port: int | None = None
+    ) -> ToolResult: ...
+
+    async def submit_flag(self, *, flag: str) -> ToolResult: ...
+
+    async def pass_turn(self) -> ToolResult: ...
