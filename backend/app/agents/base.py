@@ -80,7 +80,6 @@ class ToolChoosingAgent:
             except Exception as e:
                 logger.error(f"Unexpected error: {e}")
                 return ToolCall(name="pass")
-            # Step 2: Validate Output safely
             try:
                 return self._validate(result.output)
             except ValueError as e:
