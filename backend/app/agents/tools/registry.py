@@ -27,6 +27,13 @@ class ToolRegistry:
             tool for tool in self._tools.values() if tool.is_available_to(agent_type)
         ]
 
+    def get_descriptions_for_agent(self, agent_type: AgentType) -> list[str]:
+        return [
+            tool.tool_description()
+            for tool in self._tools.values()
+            if tool.is_available_to(agent_type)
+        ]
+
 
 def build_default_registry() -> ToolRegistry:
     """Create the initial Arbiter capability set without duplicate instances."""

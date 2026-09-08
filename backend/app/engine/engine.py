@@ -278,7 +278,7 @@ class Engine:
             observe = getattr(source, "observe_result", None)
             if observe is not None:
                 logger.info(
-                    f"ToolResult[{actor}]: success={result.success}, output={result.output}"
+                    f"ToolResult[{actor}]: success={result.success}, output={result.output}, error={result.error}, metadata={result.metadata}"
                 )
                 await observe(result)
 
