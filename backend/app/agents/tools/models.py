@@ -27,6 +27,12 @@ class ToolCall(BaseModel):
 
     name: str
     arguments: dict[str, Any] = Field(default_factory=dict)
+    reason: str = Field(
+        default="",
+        description=(
+            "Detailed reasoning behind this decision: what you observed in recent tool results and scratchpad, why you chose this tool, why these arguments, and what you expect to learn. Always explain your thinking here; it is shown back to you next turn."
+        ),
+    )
 
 
 class ToolResult(BaseModel):
@@ -37,3 +43,10 @@ class ToolResult(BaseModel):
     error: str | None = None
     exit_code: int | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    notice: str | None = Field(
+        default=None,
+        description=(
+            "Optional guidance attached when the output exceeded token "
+            "limits (e.g. it will be hidden next turn)."
+        ),
+    )

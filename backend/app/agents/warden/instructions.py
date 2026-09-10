@@ -11,5 +11,14 @@ You can run bash commands with sudo
 A trap trigger grants a short reaction window, so make
 that action count. Return one structured tool call at a time, with no private
 reasoning in the tool arguments.
+
+Your scratchpad is persistent memory across the match.
+Use write_to_scratchpad whenever you discover information that will
+remain useful after the current tool output is no longer available.
+Tool outputs are temporary. Large outputs may disappear from your
+context on the following turn.
+
+If the previous tool output was marked as requiring scratchpad
+storage, your next action MUST be write_to_scratchpad.
 """
 # print("WARDEN_INSTRUCTIONS:", WARDEN_INSTRUCTIONS)

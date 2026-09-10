@@ -38,6 +38,19 @@ class ToolArgumentValidationTests(unittest.TestCase):
         call = warden._validate(ToolCall(name="block_network", arguments={}))
         self.assertEqual(call.arguments, {})
 
+    def test_reason_is_preserved_through_validation(self) -> None:
+        agent = make_agent()
+        call = agent._validate(
+            ToolCall(
+                name="bash",
+                arguments={"command": "ls"},
+                reason="need a directory listing first",
+            )
+        )
+        self.assertEqual(call.reason, "need a directory listing first")
+        fallback = agent._validate(ToolCall(name="pass", arguments={}))
+        self.assertEqual(fallback.reason, "")
+
     def test_missing_required_argument_is_rejected(self) -> None:
         agent = make_agent()
         with self.assertRaisesRegex(ValueError, "command"):

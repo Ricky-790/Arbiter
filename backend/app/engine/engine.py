@@ -6,10 +6,26 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+import logfire
+
 from app.agents.models import AgentType
+from app.agents.tokens import (
+    count_tokens,
+    lower_limit_notice,
+    lower_token_limit,
+    upper_limit_notice,
+    upper_limit_redaction,
+    upper_token_limit,
+)
 from app.agents.tools import ToolCall, ToolExecutionContext, ToolRegistry, ToolResult
 from app.agents.tools.registry import build_default_registry
 from app.logger import get_logger
+from app.observability import (
+    output_telemetry,
+    record_match_event,
+    set_span_attributes,
+    tool_execution_span,
+)
 from app.sandbox.manager import SandboxManager
 from app.sandbox.models import ChallengeSpec, SandboxEvent
 
@@ -19,6 +35,8 @@ from .models import MatchState, MatchStatus, utc_now
 from .traps import TRAP_TOOL_NAMES, TrapManager
 
 logger = get_logger()
+# logfire.configure()
+# logfire.instrument_pydantic_ai()
 
 
 @runtime_checkable
@@ -147,6 +165,11 @@ class Engine:
         self.state.status = MatchStatus.RUNNING
         self.state.started_at = utc_now()
         self._record("match_started")
+        record_match_event(
+            "match_started",
+            match_id=self.state.match_id,
+            challenge=self.state.challenge.name,
+        )
         logger.info("Match is running")
 
     async def execute_tool_call(self, actor: AgentType, call: ToolCall) -> ToolResult:
@@ -154,6 +177,14 @@ class Engine:
         async with self._action_lock:
             if self.state.status is not MatchStatus.RUNNING:
                 logger.warning("Match not running")
+                record_match_event(
+                    "tool_rejected",
+                    match_id=self.state.match_id,
+                    actor=actor.value,
+                    tool=call.name,
+                    failure_category="match_not_running",
+                    success=False,
+                )
                 return ToolResult(success=False, error="Match is not running")
             try:
                 tool = self.registry.get(call.name)
@@ -161,28 +192,82 @@ class Engine:
                 logger.fatal(
                     f"LLM called non-existent tool. tool: {call.name}, args: {call.arguments}"
                 )
+                record_match_event(
+                    "tool_rejected",
+                    match_id=self.state.match_id,
+                    actor=actor.value,
+                    tool=call.name,
+                    failure_category="tool_not_found",
+                    success=False,
+                )
                 return ToolResult(success=False, error=f"Unknown tool: {call.name}")
             if not tool.is_available_to(actor):
                 logger.fatal(f"Tool call fail: {actor.value} cannot use {call.name}")
+                record_match_event(
+                    "tool_rejected",
+                    match_id=self.state.match_id,
+                    actor=actor.value,
+                    tool=call.name,
+                    failure_category="tool_not_allowed",
+                    success=False,
+                )
                 return ToolResult(
                     success=False, error=f"{actor.value} cannot use {call.name}"
                 )
             if not self.cooldowns.can_act(self.state, actor):
                 logger.warning(f"{actor} tool call: On Cooldown ")
+                record_match_event(
+                    "tool_rejected",
+                    match_id=self.state.match_id,
+                    actor=actor.value,
+                    tool=call.name,
+                    failure_category="cooldown",
+                    success=False,
+                )
                 return ToolResult(success=False, error="Tool cooldown is active")
             if not self.credits.can_afford(self.state, actor, tool.cost):
                 logger.warning(f"{actor} tool call: Low Credits")
+                record_match_event(
+                    "tool_rejected",
+                    match_id=self.state.match_id,
+                    actor=actor.value,
+                    tool=call.name,
+                    failure_category="insufficient_credits",
+                    success=False,
+                )
                 return ToolResult(success=False, error="Insufficient credits")
             if actor is AgentType.WARDEN:
                 trap_error = self.traps.validate_arm(self.state, call)
                 if trap_error:
                     logger.warning(f"Trap set failed: {trap_error}")
+                    record_match_event(
+                        "tool_rejected",
+                        match_id=self.state.match_id,
+                        actor=actor.value,
+                        tool=call.name,
+                        failure_category="trap_blocked",
+                        success=False,
+                    )
                     return ToolResult(success=False, error=trap_error)
 
             self.credits.deduct(self.state, actor, tool.cost)
             self.cooldowns.start(self.state, actor)
             context = EngineExecutionContext(self, actor)
-            result = await tool.execute(context, **call.arguments)
+            with tool_execution_span(
+                match_id=self.state.match_id, actor=actor.value, tool=call.name
+            ) as span:
+                result = await tool.execute(context, **call.arguments)
+            set_span_attributes(
+                span,
+                {
+                    "stage": "executed",
+                    "success": result.success,
+                    "exit_code": result.exit_code,
+                    "credits_charged": tool.cost.value,
+                    **output_telemetry(result.output),
+                },
+            )
+            result = self._apply_output_limits(actor, result)
             self._agent_state(actor).last_result = result
             self._record(
                 "tool_result", actor=actor.value, tool=call.name, success=result.success
@@ -208,6 +293,11 @@ class Engine:
                 "trap_triggered",
                 trap=trap.tool_name if trap else None,
                 reaction_until=reaction_until.isoformat(),
+            )
+            record_match_event(
+                "trap_triggered",
+                match_id=self.state.match_id,
+                trap=trap.tool_name if trap else None,
             )
             return True
 
@@ -276,6 +366,12 @@ class Engine:
             winner=winner.value if winner else None,
             end_reason=end_reason,
         )
+        record_match_event(
+            "match_finished",
+            match_id=self.state.match_id,
+            winner=winner.value if winner else None,
+            end_reason=end_reason,
+        )
 
     async def _agent_loop(self, actor: AgentType, source: AgentActionSource) -> None:
         while not self._stop_event.is_set():
@@ -294,7 +390,7 @@ class Engine:
                 logger.info(
                     f"ToolResult[{actor}]: success={result.success}, output={result.output}, error={result.error}, metadata={result.metadata}"
                 )
-                await observe(result)
+                await observe(call, result)
 
     def _setup_commands(self) -> list[str]:
         challenge = self.state.challenge
@@ -311,6 +407,41 @@ class Engine:
                 f"printf %s {shlex.quote(content)} > {shlex.quote(path)} && chmod 600 {shlex.quote(path)}"
             )
         return commands
+
+    @staticmethod
+    def _apply_output_limits(actor: AgentType, result: ToolResult) -> ToolResult:
+        """Enforce the two-tier output policy on a fresh tool result.
+
+        - Above ``UPPER_TOKEN_LIMIT``: ``output`` is redacted immediately
+          (never sent, not even once); guidance goes in ``notice``.
+        - Above ``LOWER_TOKEN_LIMIT``: ``output`` is kept for exactly one
+          turn and a hide-next-turn ``notice`` is attached; the agent hides
+          the field afterwards.
+        - Otherwise: untouched.
+        """
+        token_count = count_tokens(result.output or "")
+        upper = upper_token_limit()
+        if token_count > upper:
+            logger.info(
+                f"[{actor}] tool output ({token_count} tokens > upper limit "
+                f"{upper}): redacted immediately."
+            )
+            return result.model_copy(
+                update={
+                    "output": upper_limit_redaction(token_count, upper),
+                    "notice": upper_limit_notice(token_count, upper),
+                }
+            )
+        lower = lower_token_limit()
+        if token_count > lower:
+            logger.info(
+                f"[{actor}] tool output ({token_count} tokens > lower limit "
+                f"{lower}): kept for one turn with notice."
+            )
+            return result.model_copy(
+                update={"notice": lower_limit_notice(token_count, lower)}
+            )
+        return result
 
     def _sandbox_user(self, actor: AgentType) -> str:
         challenge = self.state.challenge

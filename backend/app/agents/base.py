@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import os
+import json
 from collections import deque
 from collections.abc import Iterable
-from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Union, get_args, get_origin
 
 from pydantic_ai import Agent
@@ -15,47 +14,17 @@ from pydantic_ai.exceptions import ModelHTTPError
 from app.logger import get_logger
 
 from .agents_directory import agent_mapper
+from .tokens import (
+    HIDDEN_OUTPUT_PLACEHOLDER,
+    count_tokens,
+    lower_token_limit,
+)
 from .tools.models import ToolCall, ToolResult
 
 if TYPE_CHECKING:
     from .tools.registry import ToolRegistry
 
 logger = get_logger()
-
-LONG_OUTPUT_NOTICE = (
-    "Output very long, will be truncated / replaced next turn. "
-    "Please use write to scratchpad tool to note any important observations."
-)
-
-HIDDEN_OUTPUT_PLACEHOLDER = (
-    "[Long Output hidden, please refer to scratchpad for important information]"
-)
-
-
-def _max_output_tokens() -> int:
-    """Token budget for a single tool output, read from .env (`MAX_TOKENS`)."""
-    try:
-        return int(os.getenv("MAX_TOKENS", "4000"))
-    except (TypeError, ValueError):
-        return 4000
-
-
-@lru_cache(maxsize=1)
-def _get_encoding():  # type: ignore[no-untyped-def]
-    try:
-        import tiktoken
-
-        return tiktoken.get_encoding("cl100k_base")
-    except Exception:
-        return None
-
-
-def _count_tokens(text: str) -> int:
-    enc = _get_encoding()
-    if enc is None:
-        # Fallback heuristic (~4 chars/token) when tiktoken is unavailable.
-        return max(1, len(text) // 4) if text else 0
-    return len(enc.encode(text))
 
 
 try:
@@ -157,7 +126,10 @@ class ToolChoosingAgent:
 
             registry = build_default_registry()
         self._registry = registry
-        self._observations: list[str] = []
+        # Ordered (ToolCall, ToolResult) pairs; rendered as JSON in prompts so
+        # the LLM sees both its prior reasoning and each result. Never shared
+        # between agent instances.
+        self._observations: list[tuple[ToolCall, ToolResult]] = []
         self._scripted_calls = deque(scripted_calls or ())
         self._scripted_mode = scripted_calls is not None
 
@@ -177,7 +149,7 @@ class ToolChoosingAgent:
             prompt += f"\nCurrent match objective: {self.objective}"
         prompt += f"\nYour scratchpad:\n<scratchpad>{scratchpad}</scratchpad>"
         if self._observations:
-            prompt += "\nRecent tool results:\n" + "\n".join(
+            prompt += "\nRecent tool calls and results (JSON):\n" + "\n".join(
                 self._format_recent_observations()
             )
         current_prompt = prompt
@@ -214,55 +186,62 @@ class ToolChoosingAgent:
         logger.critical("Max retries exceeded for tool call generation.")
         return ToolCall(name="pass")
 
-    async def observe_result(self, result: ToolResult) -> None:
-        summary = result.output if result.success else f"ERROR: {result.error}"
-        summary = summary or ""
-        limit = _max_output_tokens()
-        token_count = _count_tokens(summary)
-        if token_count > limit:
-            # Full output is kept for exactly this turn: it becomes the most
-            # recent observation and is sent verbatim on the next prompt,
-            # plus a notice so the agent persists anything important.
-            summary = (
-                f"{summary}\n\n{LONG_OUTPUT_NOTICE} "
-                f"(output was ~{token_count} tokens, limit is {limit} tokens.)"
-            )
-            logger.info(
-                f"Large tool output ({token_count} tokens > {limit}): "
-                "keeping full output for this turn only."
-            )
-        self._observations.append(summary)
-        self._truncate_older_observations()
+    async def observe_result(self, call: ToolCall, result: ToolResult) -> None:
+        # Store copies: later hiding redacts stored outputs in place and must
+        # never mutate the result the engine recorded.
+        self._observations.append(
+            (call.model_copy(deep=True), result.model_copy(deep=True))
+        )
+        self._hide_older_observations()
 
-    def _truncate_older_observations(self) -> None:
-        """Replace every observation except the most recent if over budget.
+    def _hide_older_observations(self) -> None:
+        """Hide the ``output`` field of older over-budget results in place.
 
-        Called right after a new result is observed, so the just-observed
-        output stays full for one turn and older large outputs are hidden.
+        Called right after a new pair is observed, so the just-observed
+        output stays full for one turn. Only the oversized ``output`` field
+        is replaced; ``success``, ``error``, ``exit_code``, ``notice`` (and
+        the paired reason) are kept as-is.
         """
         if len(self._observations) <= 1:
             return
-        limit = _max_output_tokens()
+        limit = lower_token_limit()
         for i in range(len(self._observations) - 1):
-            if _count_tokens(self._observations[i]) > limit:
-                self._observations[i] = HIDDEN_OUTPUT_PLACEHOLDER
+            _, stored = self._observations[i]
+            if count_tokens(stored.output or "") > limit:
+                self._observations[i] = (
+                    self._observations[i][0],
+                    stored.model_copy(
+                        update={"output": HIDDEN_OUTPUT_PLACEHOLDER}
+                    ),
+                )
 
     def _format_recent_observations(self) -> list[str]:
-        """Render the last 5 observations: most recent full, older hidden.
+        """Render the last 5 (call, result) pairs as JSON: most recent full.
 
-        Defensive pass for the case where MAX_TOKENS changed at runtime or
-        history predates hiding; normally _truncate_older_observations
-        has already replaced older large entries in place.
+        Defensive pass for the case where limits changed at runtime or
+        history predates hiding; normally ``_hide_older_observations`` has
+        already hidden older large outputs in place.
         """
-        limit = _max_output_tokens()
+        limit = lower_token_limit()
         recent = self._observations[-5:]
         formatted: list[str] = []
-        for j, text in enumerate(recent):
+        for j, (call, result) in enumerate(recent):
             is_most_recent = j == len(recent) - 1
-            if not is_most_recent and _count_tokens(text) > limit:
-                formatted.append(HIDDEN_OUTPUT_PLACEHOLDER)
-            else:
-                formatted.append(text)
+            if not is_most_recent and count_tokens(result.output or "") > limit:
+                result = result.model_copy(
+                    update={"output": HIDDEN_OUTPUT_PLACEHOLDER}
+                )
+            formatted.append(
+                json.dumps(
+                    {
+                        "tool_call": call.model_dump(),
+                        "tool_result": result.model_dump(
+                            exclude_none=True, exclude={"metadata"}
+                        ),
+                    },
+                    ensure_ascii=False,
+                )
+            )
         return formatted
 
     def _validate(self, call: ToolCall) -> ToolCall:
@@ -296,7 +275,7 @@ class ToolChoosingAgent:
             )
             for name, value in bound.arguments.items()
         }
-        return ToolCall(name=call.name, arguments=coerced)
+        return ToolCall(name=call.name, arguments=coerced, reason=call.reason)
 
     @staticmethod
     def _expected_args_hint(params: dict[str, inspect.Parameter]) -> str:
