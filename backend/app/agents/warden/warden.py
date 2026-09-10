@@ -19,6 +19,9 @@ class WardenAgent(ToolChoosingAgent):
             instructions=WARDEN_INSTRUCTIONS,
             allowed_tools={
                 "bash",
+                "read_file",
+                "write_file",
+                "write_to_scratchpad",
                 "watch_file",
                 "watch_process",
                 "kill_process",

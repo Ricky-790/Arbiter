@@ -17,7 +17,14 @@ class PrisonerAgent(ToolChoosingAgent):
         super().__init__(
             model_name=model_name,
             instructions=PRISONER_INSTRUCTIONS,
-            allowed_tools={"bash", "submit_flag", "pass"},
+            allowed_tools={
+                "bash",
+                "read_file",
+                "write_file",
+                "write_to_scratchpad",
+                "submit_flag",
+                "pass",
+            },
             objective=objective,
             scripted_calls=scripted_calls,
         )

@@ -23,7 +23,7 @@ logger = get_logger()
 
 @runtime_checkable
 class AgentActionSource(Protocol):
-    async def next_tool_call(self) -> ToolCall: ...
+    async def next_tool_call(self, scratchpad: str = "") -> ToolCall: ...
 
 
 class EngineExecutionContext(ToolExecutionContext):
@@ -35,12 +35,7 @@ class EngineExecutionContext(ToolExecutionContext):
 
     @property
     def _user(self) -> str:
-        challenge = self.engine.state.challenge
-        return (
-            challenge.prisoner_user
-            if self.actor is AgentType.PRISONER
-            else challenge.warden_user
-        )
+        return self.engine._sandbox_user(self.actor)
 
     async def run_command(self, *, command: str) -> ToolResult:
         return await self.engine.sandbox_manager.run_command(
@@ -287,7 +282,8 @@ class Engine:
             if not self.cooldowns.can_act(self.state, actor):
                 await asyncio.sleep(0.05)
                 continue
-            call = await source.next_tool_call()
+            scratchpad = await self._read_scratchpad(actor)
+            call = await source.next_tool_call(scratchpad)
             logger.info(
                 f"ToolCall Request[{actor}]: name={call.name} args={call.arguments}"
             )
@@ -315,6 +311,37 @@ class Engine:
                 f"printf %s {shlex.quote(content)} > {shlex.quote(path)} && chmod 600 {shlex.quote(path)}"
             )
         return commands
+
+    def _sandbox_user(self, actor: AgentType) -> str:
+        challenge = self.state.challenge
+        return (
+            challenge.prisoner_user
+            if actor is AgentType.PRISONER
+            else challenge.warden_user
+        )
+
+    async def _read_scratchpad(self, actor: AgentType) -> str:
+        """Read the actor's private scratchpad for prompt enrichment.
+
+        Uses the sandbox manager's ``read_file`` (which resolves the path via
+        ``_validate_path`` and reads as the acting user, preserving
+        prisoner/warden isolation). Returns "" when the file is missing,
+        empty, unreadable, or any error occurs, so a scratchpad failure can
+        never break the agent loop. This is prompt enrichment, not a tool
+        call: no credits or cooldowns are involved.
+        """
+        try:
+            result = await self.sandbox_manager.read_file(
+                match_id=self.state.match_id,
+                path="scratchpad.txt",
+                user=self._sandbox_user(actor),
+            )
+        except Exception:
+            logger.warning(f"[{actor}] scratchpad read failed; using empty scratchpad")
+            return ""
+        if not result.success or not (result.output or "").strip():
+            return ""
+        return result.output
 
     def _agent_state(self, actor: AgentType):
         return self.state.prisoner if actor is AgentType.PRISONER else self.state.warden

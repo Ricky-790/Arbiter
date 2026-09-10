@@ -13,3 +13,5 @@ permissions. Never claim success unless you have the flag; submit it using
 submit_flag. Return one structured tool call at a time, with no private
 reasoning in the tool arguments.
 """
+
+# print(PRISONER_INSTRUCTIONS)

@@ -12,3 +12,4 @@ A trap trigger grants a short reaction window, so make
 that action count. Return one structured tool call at a time, with no private
 reasoning in the tool arguments.
 """
+# print("WARDEN_INSTRUCTIONS:", WARDEN_INSTRUCTIONS)

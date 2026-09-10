@@ -119,6 +119,7 @@ dependencies = [
     { name = "pydantic-ai-slim", extra = ["groq"] },
     { name = "rich" },
     { name = "solari-sandbox" },
+    { name = "tiktoken" },
 ]
 
 [package.metadata]
@@ -129,6 +130,7 @@ requires-dist = [
     { name = "pydantic-ai-slim", extras = ["groq"], specifier = ">=2.37.0" },
     { name = "rich", specifier = ">=15.0.0" },
     { name = "solari-sandbox", specifier = ">=0.2.0" },
+    { name = "tiktoken", specifier = ">=0.7.0" },
 ]
 
 [[package]]

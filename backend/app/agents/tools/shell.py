@@ -13,10 +13,12 @@ class BashTool(BaseTool):
     def __init__(self) -> None:
         super().__init__(
             name="bash",
-            description="Execute an arbitrary shell command in your sandbox.",
+            description="Execute an arbitrary shell command in your sandbox. example: ls -la / | grep 'home'",
             allowed_agents=frozenset({AgentType.PRISONER, AgentType.WARDEN}),
             cost=ToolCost.BASH,
         )
 
-    async def execute(self, context: ToolExecutionContext, *, command: str) -> ToolResult:
+    async def execute(
+        self, context: ToolExecutionContext, *, command: str
+    ) -> ToolResult:
         return await context.run_command(command=command)
