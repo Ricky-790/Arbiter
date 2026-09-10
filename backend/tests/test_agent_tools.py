@@ -15,6 +15,15 @@ class RecordingContext:
     async def run_command(self, *, command: str) -> ToolResult:
         return await self._result("run_command", command=command)
 
+    async def read_file(self, *, path: str) -> ToolResult:
+        return await self._result("read_file", path=path)
+
+    async def write_file(self, *, path: str, content: str) -> ToolResult:
+        return await self._result("write_file", path=path, content=content)
+
+    async def write_to_scratchpad(self, *, content: str) -> ToolResult:
+        return await self._result("write_to_scratchpad", content=content)
+
     async def watch_file(self, *, path: str) -> ToolResult:
         return await self._result("watch_file", path=path)
 
@@ -45,12 +54,15 @@ class ToolRegistryTests(unittest.TestCase):
 
         self.assertEqual(
             {tool.name for tool in registry.get_for_agent(AgentType.PRISONER)},
-            {"bash", "submit_flag", "pass"},
+            {"bash", "read_file", "write_file", "write_to_scratchpad", "submit_flag", "pass"},
         )
         self.assertEqual(
             {tool.name for tool in registry.get_for_agent(AgentType.WARDEN)},
             {
                 "bash",
+                "read_file",
+                "write_file",
+                "write_to_scratchpad",
                 "watch_file",
                 "watch_process",
                 "kill_process",

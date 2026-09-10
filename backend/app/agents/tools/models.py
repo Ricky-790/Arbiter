@@ -10,6 +10,9 @@ class ToolCost(IntEnum):
     """Credit costs exposed as tool metadata; tools never deduct them."""
 
     BASH = 2
+    READ_FILE = 0
+    WRITE_FILE = 0
+    WRITE_SCRATCHPAD = 0
     WATCH_FILE = 3
     WATCH_PROCESS = 4
     KILL_PROCESS = 5

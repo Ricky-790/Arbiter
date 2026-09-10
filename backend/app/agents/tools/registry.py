@@ -37,7 +37,12 @@ class ToolRegistry:
 
 def build_default_registry() -> ToolRegistry:
     """Create the initial Arbiter capability set without duplicate instances."""
-    from .filesystem import WatchFileTool
+    from .filesystem import (
+        ReadFileTool,
+        WatchFileTool,
+        WriteFileTool,
+        WriteToScratchpadTool,
+    )
     from .network import BlockNetworkTool
     from .process import AutoKillTool, KillProcessTool, WatchProcessTool
     from .shell import BashTool
@@ -46,6 +51,9 @@ def build_default_registry() -> ToolRegistry:
     return ToolRegistry(
         [
             BashTool(),
+            ReadFileTool(),
+            WriteFileTool(),
+            WriteToScratchpadTool(),
             WatchFileTool(),
             WatchProcessTool(),
             KillProcessTool(),

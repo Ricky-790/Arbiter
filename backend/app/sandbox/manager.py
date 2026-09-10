@@ -1,15 +1,18 @@
 import asyncio
+import base64
 import shlex
 from collections.abc import Awaitable, Callable
+from pathlib import Path, PurePosixPath
 
 from solari_core import CodeLanguage
 from solari_sandbox import Sandbox
 
+from app import sandbox
 from app.agents.tools.models import ToolResult
 from app.logger import get_logger
 
 from .client import SolariClient
-from .models import CommandResult, SandboxConfig
+from .models import ChallengeSpec, CommandResult, SandboxConfig
 from .monitor import EventHandler, SandboxMonitor
 
 logger = get_logger()
@@ -99,14 +102,70 @@ class SandboxManager:
             context_id=context_id,
         )
 
-    async def read_file(self, *, match_id: str, path: str) -> str:
-        return await self.client.read_file(await self.get_sandbox(match_id), path=path)
+    async def read_file(self, *, match_id: str, path: str, user: str) -> ToolResult:
+        """Read a file inside the sandbox as the acting user.
+
+        Executed via a shell command under ``user`` so OS permissions apply.
+        The privileged ``files`` API is deliberately not used here because it
+        would bypass prisoner/warden permissions.
+        """
+        try:
+            validated_path = self._validate_path(path, user)
+            return await self.run_command(
+                match_id=match_id,
+                command=f"cat -- {shlex.quote(validated_path)}",
+                user=user,
+            )
+        except ValueError as e:
+            return ToolResult(success=False, error=str(e))
 
     async def write_file(
-        self, *, match_id: str, path: str, content: str, mode: int | None = None
-    ) -> None:
-        await self.client.write_file(
-            await self.get_sandbox(match_id), path=path, content=content, mode=mode
+        self, *, match_id: str, path: str, content: str, user: str
+    ) -> ToolResult:
+        """Write content to a file inside the sandbox as the acting user.
+
+        Parent directories are created as that same user, so unwritable
+        locations fail instead of bypassing prisoner/warden permissions.
+        """
+        try:
+            validated_path = self._validate_path(path, user)
+            parent = str(PurePosixPath(validated_path).parent)
+            encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
+            mkdir = (
+                f"mkdir -p -- {shlex.quote(parent)} && "
+                if parent and parent != "."
+                else ""
+            )
+            command = (
+                f"{mkdir}printf '%s' {shlex.quote(encoded)} | base64 -d > "
+                f"{shlex.quote(validated_path)}"
+            )
+            result = await self.run_command(
+                match_id=match_id, command=command, user=user
+            )
+            if not result.success:
+                return result
+            return ToolResult(
+                success=True, output=f"Wrote {len(content)} bytes to {validated_path}"
+            )
+        except ValueError as e:
+            return ToolResult(success=False, error=str(e))
+
+    async def write_to_scratchpad(
+        self, *, match_id: str, content: str, user: str
+    ) -> ToolResult:
+        """Append content to the actor's private scratchpad as that user."""
+        path = self._scratchpad_path(user)
+        encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
+        command = (
+            f"printf '%s' {shlex.quote(encoded)} | base64 -d >> "
+            f"{shlex.quote(path)} && printf '\\n' >> {shlex.quote(path)}"
+        )
+        result = await self.run_command(match_id=match_id, command=command, user=user)
+        if not result.success:
+            return result
+        return ToolResult(
+            success=True, output=f"Appended {len(content)} bytes to scratchpad"
         )
 
     async def watch_file(self, *, match_id: str, path: str) -> ToolResult:
@@ -150,6 +209,20 @@ class SandboxManager:
                 f"iptables -A OUTPUT -d {shlex.quote(ip)} -p tcp --dport {port} -j DROP"
             )
         return await self.run_command(match_id=match_id, command=command, user="root")
+
+    @staticmethod
+    def _scratchpad_path(user: str) -> str:
+        return f"/home/{user}/scratchpad.txt"
+
+    @staticmethod
+    def _validate_path(path: str, user: str) -> str:
+        if not path or "\x00" in path:
+            raise ValueError("Invalid path")
+        if path.__contains__("~"):
+            raise ValueError("Cannont contain `~`")
+        if path.startswith("/"):
+            path = path.removeprefix("/")
+        return f"/home/{user}/{path}"
 
     @staticmethod
     def _tool_result(result: CommandResult) -> ToolResult:
@@ -214,3 +287,64 @@ class SandboxManager:
 
 # Singleton instance of SandboxManager
 sandbox_manager = SandboxManager()
+
+# async def main():
+#     await sandbox_manager.create_new_sandbox(match_id="test1")
+#     challenge = ChallengeSpec(name="ctf", description="test", flag="hello")
+#     commands = [
+#         f"id -u {shlex.quote(challenge.warden_user)} >/dev/null 2>&1 || useradd -m -s /bin/bash {shlex.quote(challenge.warden_user)}",
+#         f"usermod -aG sudo {shlex.quote(challenge.warden_user)}",
+#         f"id -u {shlex.quote(challenge.prisoner_user)} >/dev/null 2>&1 || useradd -m -s /bin/bash {shlex.quote(challenge.prisoner_user)}",
+#     ]
+#     files = {"/root/secret.txt": challenge.flag, **challenge.files}
+#     for path, content in files.items():
+#         commands.append(
+#             "install -d -m 700 "
+#             f"{shlex.quote(str(Path(path).parent))} && "
+#             f"printf %s {shlex.quote(content)} > {shlex.quote(path)} && chmod 600 {shlex.quote(path)}"
+#         )
+#     for command in commands:
+#         result = await sandbox_manager.run_command(
+#             match_id="test1", command=command, user="root"
+#         )
+#     result = await sandbox_manager.read_file(
+#         match_id="test1", path="/root/secret.txt", user="prisoner"
+#     )
+#     logger.info(f"read_file result[prisoner]: {result}")
+#     result = await sandbox_manager.read_file(
+#         match_id="test1", path="/root/secret.txt", user="warden"
+#     )
+#     logger.info(f"read_file result[warden]: {result}")
+
+#     result = await sandbox_manager.write_file(
+#         match_id="test1",
+#         path="~/root/abc.txt",
+#         content="prisoner text",
+#         user="prisoner",
+#     )
+#     logger.info(f"write_file result[prisoner] to root:{result}")
+#     result = await sandbox_manager.write_file(
+#         match_id="test1", path="/root/def.txt", content="warden text", user="warden"
+#     )
+#     logger.info(f"write_file result[warden] to root:{result}")
+#     result = await sandbox_manager.write_file(
+#         match_id="test1", path="abc.txt", content="prisoner text", user="prisoner"
+#     )
+#     logger.info(f"write_file result[prisoner]:{result}")
+#     result = await sandbox_manager.write_file(
+#         match_id="test1", path="def.txt", content="warden text", user="warden"
+#     )
+#     logger.info(f"write_file result[warden]:{result}")
+#     result = await sandbox_manager.write_to_scratchpad(
+#         match_id="test1", content="prisoner text", user="prisoner"
+#     )
+#     logger.info(f"write_file result[prisoner] to root:{result}")
+#     result = await sandbox_manager.write_to_scratchpad(
+#         match_id="test1", content="warden text", user="warden"
+#     )
+#     logger.info(f"write_file result[warden] to root:{result}")
+
+
+# # import asyncio
+# if __name__ == "__main__":
+#     asyncio.run(main())

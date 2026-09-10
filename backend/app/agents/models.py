@@ -14,6 +14,9 @@ class AgentType(str, Enum):
 
 class ActionType(str, Enum):
     BASH = "bash"
+    READ_FILE = "read_file"
+    WRITE_FILE = "write_file"
+    WRITE_SCRATCHPAD = "write_to_scratchpad"
     WATCH_FILE = "watch_file"
     WATCH_PROCESS = "watch_process"
     KILL_PROCESS = "kill_process"

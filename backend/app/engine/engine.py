@@ -47,6 +47,24 @@ class EngineExecutionContext(ToolExecutionContext):
             match_id=self.engine.state.match_id, command=command, user=self._user
         )
 
+    async def read_file(self, *, path: str) -> ToolResult:
+        return await self.engine.sandbox_manager.read_file(
+            match_id=self.engine.state.match_id, path=path, user=self._user
+        )
+
+    async def write_file(self, *, path: str, content: str) -> ToolResult:
+        return await self.engine.sandbox_manager.write_file(
+            match_id=self.engine.state.match_id,
+            path=path,
+            content=content,
+            user=self._user,
+        )
+
+    async def write_to_scratchpad(self, *, content: str) -> ToolResult:
+        return await self.engine.sandbox_manager.write_to_scratchpad(
+            match_id=self.engine.state.match_id, content=content, user=self._user
+        )
+
     async def watch_file(self, *, path: str) -> ToolResult:
         return await self.engine.sandbox_manager.watch_file(
             match_id=self.engine.state.match_id, path=path

@@ -2,7 +2,12 @@
 
 from .base import BaseTool
 from .execution import ToolExecutionContext
-from .filesystem import WatchFileTool
+from .filesystem import (
+    ReadFileTool,
+    WatchFileTool,
+    WriteFileTool,
+    WriteToScratchpadTool,
+)
 from .models import ToolCall, ToolCost, ToolResult
 from .network import BlockNetworkTool
 from .process import AutoKillTool, KillProcessTool, WatchProcessTool
@@ -19,6 +24,9 @@ __all__ = [
     "ToolResult",
     "ToolCall",
     "BashTool",
+    "ReadFileTool",
+    "WriteFileTool",
+    "WriteToScratchpadTool",
     "KillProcessTool",
     "WatchFileTool",
     "WatchProcessTool",
