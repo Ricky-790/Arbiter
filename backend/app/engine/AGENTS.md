@@ -2,143 +2,250 @@
 
 ## Purpose
 
-The Engine is the authoritative runtime for one Arbiter match.
+The Engine is the authoritative runtime for exactly one Arbiter match.
 
 It owns:
 
 - match state
 - lifecycle
-- action validation
-- cooldowns
+- action authorization
 - credits
-- traps
-- timing
+- cooldowns
+- match timeout
 - agent concurrency
+- traps
 - win/loss conditions
 - sandbox setup/cleanup
+- match-level events
 
-If a rule determines whether an action is legal or whether the match has ended, it belongs here.
+If a rule determines whether an action is legal, what it costs, or whether the match ends, it belongs here.
 
-## `Engine`
+## Native deferred-tool architecture
 
-Each Engine represents exactly one active match.
+The Engine does **not** ask agents to produce a custom `ToolCall` structured output.
 
-Constructor inputs include:
+Agents use Pydantic AI native deferred tool calls.
 
-- `match_id`
-- `ChallengeSpec`
-- `SandboxManager`
-- optional `ToolRegistry`
-- cooldown configuration
+The Engine binds an authoritative executor to each agent:
 
-The Engine creates the sandbox through `SandboxManager`.
+```text
+Pydantic AI Agent
+       |
+       | native deferred request
+       v
+Engine executor
+       |
+       v
+execute_tool_call()
+       |
+       +-- authorization
+       +-- credits
+       +-- cooldown
+       +-- trap rules
+       |
+       v
+EngineExecutionContext
+       |
+       v
+Tool
+       |
+       v
+SandboxManager
+```
 
-## Action execution
+The Engine still owns an outer match loop that runs Prisoner and Warden concurrently and terminates the match on completion, failure policy, or timeout.
 
-`execute_tool_call()` is the central authorization boundary.
+Do not recreate Pydantic AI's model/tool conversation loop in Engine.
 
-Current sequence:
+## `execute_tool_call()`
+
+This is the central authorization and budgeting boundary.
+
+For a normal charged action:
 
 ```text
 1. verify match is RUNNING
 2. resolve tool
-3. verify actor can use tool
-4. check cooldown
+3. verify actor may use it
+4. check action cooldown
 5. check credits
-6. validate Warden trap constraints
+6. validate Warden trap constraints when applicable
 7. deduct credits
-8. start cooldown
+8. start action cooldown
 9. create EngineExecutionContext
 10. execute tool
 11. record result
 12. update trap state if applicable
 ```
 
-Do not move these checks into individual tools.
+### Free tools
+
+These tools are intentionally exempt from credit deduction and action cooldown:
+
+- `read_file`
+- `write_file`
+- `write_to_scratchpad`
+
+For these tools:
+
+```text
+match running
+ -> authorization
+ -> execute
+ -> result
+```
+
+Do not charge them or start the normal action cooldown.
+
+The match's wall-clock timeout remains active independently.
 
 ## `EngineExecutionContext`
 
 This is the per-action adapter between Engine and `ToolExecutionContext`.
 
-It binds an actor to an Engine so tools do not need:
+It binds an actor to the Engine without exposing Engine internals to tools.
+
+Tools must not receive:
 
 - `match_id`
-- user identity
-- SandboxManager
-- Engine internals
+- `SandboxManager`
+- mutable global actor state
+- direct Engine state
 
-It derives the acting sandbox user from the challenge.
+The context derives the sandbox user from the challenge and delegates operations to `SandboxManager`.
 
-Do not replace this with mutable "current actor" global state.
+## Sandbox execution
 
-## Concurrency
+`SandboxManager` is the component that actually executes sandbox operations.
+
+The Engine performs game-rule validation and then invokes tools through `EngineExecutionContext`.
+
+The Engine must not make direct Solari calls.
+
+Do not introduce `SandboxExecution` or another wrapper around `SandboxManager`.
+
+## Agent concurrency
 
 Prisoner and Warden run as independent asyncio tasks.
 
-The Engine is not turn-based.
+This is not strict turn-based execution.
 
-The `_action_lock` currently serializes critical match actions. Be careful when changing it: holding the lock across slow sandbox/tool operations can limit concurrency. If this is optimized later, preserve atomicity around state validation/updates.
+The Engine controls:
+
+- match wall-clock timeout
+- action cooldown pacing
+- credit budgets
+- match termination
+
+Each agent may be waiting on model inference while the other continues.
+
+## Deferred-tool executor
+
+The deferred-tool executor is an adapter, not a second agent runtime.
+
+Its job is to:
+
+1. receive a native Pydantic AI tool request
+2. convert it into the Engine's internal tool request representation if needed
+3. call `execute_tool_call()`
+4. return the structured result to Pydantic AI
+
+Do not duplicate authorization logic inside the deferred handler.
+
+Do not manually build a model conversation or feed fake tool messages to the model.
 
 ## Match termination
 
-Normal termination uses `_stop_event`.
+`run_agents()` owns match-level orchestration.
 
-`run_agents()` waits for:
+It waits for:
 
-- match stop
-- Prisoner worker completion
-- Warden worker completion
-- optional timeout
+- match completion
+- Prisoner worker termination
+- Warden worker termination
+- optional match timeout
 
-On timeout, Warden currently wins.
+On timeout, the current V1 policy is Warden wins.
 
-Always cancel and gather worker/waiter tasks and destroy the sandbox in cleanup.
+Always:
+
+- cancel remaining agent tasks
+- gather them
+- destroy the sandbox
+- leave the final match state authoritative
+
+## Win condition
+
+For read-secret:
+
+```text
+submit_flag(correct_flag)
+    -> Engine verifies ChallengeSpec.flag
+    -> Prisoner wins
+```
+
+The LLM cannot declare itself the winner.
+
+Future challenge success conditions must remain server-authoritative.
 
 ## Traps
 
 `TrapManager` owns Warden trap state.
 
-The sandbox layer observes actual events; the Engine decides whether an event matches a trap and opens the Warden reaction window.
+The sandbox layer observes actual events.
 
-Do not move trap semantics into the sandbox monitor.
+The Engine decides whether an event matches an armed trap and manages the Warden reaction window.
 
-## Win condition
+Do not put trap semantics into sandbox monitoring or the Warden agent.
 
-For the current read-secret challenge, `submit_flag` is checked against `ChallengeSpec.flag` by the Engine.
+## Scratchpad
 
-The LLM cannot declare itself the winner.
+The scratchpad is agent-owned persistent memory exposed as a normal voluntary tool.
 
-Future challenge-specific success conditions should remain server-authoritative.
+The Engine may read the actor's scratchpad before an agent run to provide persistent context.
 
-## Events and observability
+That read is backend context enrichment, not an agent action:
 
-The Engine currently records lightweight events in match state via `_record()`.
+- no credits
+- no cooldown
+- no match action
 
-The planned `app/observability` package should eventually receive structured events/LLM/tool telemetry without making Langfuse a game-rule dependency.
+Do not force a scratchpad write because a tool result is large.
 
-Prefer a clean event boundary such as:
+## Refactoring rules
 
-```text
-Engine
-  -> structured match event
-      -> logger
-      -> observability
-      -> future WebSocket
-      -> future DB
-```
+The deferred-tool migration should remove obsolete code such as:
 
-## Errors and provider retries
+- custom model-generated `ToolCall` output contracts
+- manual argument coercion solely for repairing LLM JSON
+- manual signature validation solely for model output
+- prompt-based tool schema generation
+- manual observation replay that duplicates Pydantic AI tool history
+- custom "one tool call per output" protocols
 
-Provider failures should be handled at the agent/provider boundary with bounded retry behavior where appropriate.
+Keep:
 
-A single agent's provider failure should not automatically freeze the opponent or stop the match unless the defined match policy says so.
+- Engine authorization
+- credit/cooldown accounting
+- match timeout
+- trap validation
+- server-authoritative result checking
+- match event recording
+- scripted execution support when useful for tests
 
-Unexpected agent-loop termination should end the match rather than silently leaving the other worker alive.
+## Observability
 
-## Avoid
+Logfire/Pydantic AI should capture normal agent/model/tool-call telemetry.
 
-- game logic inside tools
-- direct Solari calls from Engine
-- global match state
-- trusting model output as proof of success
-- coupling Engine to HTTP/database/frontend concerns
+Engine-specific telemetry should record Arbiter concepts such as:
+
+- match
+- actor
+- requested tool
+- authorization result
+- credits charged
+- cooldown state
+- execution result
+- winner/reason
+
+Telemetry must never become a game-rule dependency.

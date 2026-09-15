@@ -2,96 +2,179 @@
 
 ## Purpose
 
-This package defines the capabilities exposed to LLM agents.
+`agents/tools/` defines the capabilities that Arbiter exposes to LLM agents.
 
-Current registry includes capabilities for:
+Tools are **capabilities**, not game rules.
 
-- shell execution
-- file read/write
-- scratchpad writing
-- file watching
-- process watching
-- process killing
-- automatic process killing
-- network blocking
-- flag submission
-- pass
+The current registry includes:
 
-The exact registration is defined by `registry.py`.
+- `bash`
+- `read_file`
+- `write_file`
+- `write_to_scratchpad`
+- `watch_file`
+- `watch_process`
+- `kill_process`
+- `auto_kill`
+- `block_network`
+- `submit_flag`
+- `pass`
 
-## Core design
+The exact registry is defined by `registry.py`.
 
-`BaseTool` is declarative:
+## Native tool calling
+
+Tools are exposed to Pydantic AI as native external/deferred tool definitions.
+
+The model calls them by their registered name and typed arguments.
+
+Do not create a second JSON protocol such as:
+
+```json
+{
+  "name": "bash",
+  "arguments": {}
+}
+```
+
+as the model's structured output.
+
+Do not maintain prompt-only tool descriptions when the native Pydantic AI tool definition can provide the same schema.
+
+## `BaseTool`
+
+`BaseTool` should remain small and declarative.
+
+It owns metadata:
 
 - `name`
 - `description`
 - `allowed_agents`
 - `cost`
-- typed `execute()` signature
 
-`tool_description()` derives model-facing argument information from the execute signature, so tool definitions do not need to be manually duplicated in prompts.
+and the typed `execute()` contract.
 
-`ToolRegistry` provides lookup, per-agent filtering, and generated descriptions.
+It must not own:
 
-## Critical boundary
+- match state
+- credits
+- cooldowns
+- winner logic
+- sandbox instances
+- `match_id`
+- model interaction
 
-Tools must not:
+The `execute()` implementation should delegate through `ToolExecutionContext`.
 
-- create `SandboxManager`
-- know a `match_id`
-- own cooldowns
-- deduct credits
-- decide the winner
-- mutate match state directly
+## Execution boundary
 
-Instead:
+The authoritative path is:
 
 ```text
-Tool
-  -> ToolExecutionContext
+LLM
+  -> native deferred tool call
+  -> Engine
+  -> authorization/budget/trap checks
   -> EngineExecutionContext
+  -> BaseTool.execute()
+  -> ToolExecutionContext
   -> SandboxManager
+  -> Solari
 ```
 
-This keeps tools reusable and makes the Engine the authority.
+Tools never call Solari or `SandboxManager` directly.
 
-## Tool costs
+## Credits and cooldowns
 
-`ToolCost` is metadata. Tools do not deduct credits themselves.
+`ToolCost` is metadata.
 
-The Engine checks affordability and deducts the cost before execution.
+The Engine owns credit deduction and action cooldowns.
 
-When adding a tool:
+Normal game-action tools are charged and paced by the Engine.
 
-1. add its cost
-2. define allowed agents
-3. implement a typed execute method
-4. register it
-5. add the corresponding `ToolExecutionContext` method if needed
-6. implement the Engine adapter
-7. test authorization and failure behavior
+The following tools are explicitly free:
 
-## `write_file` vs `write_to_scratchpad`
+- `read_file`
+- `write_file`
+- `write_to_scratchpad`
 
-Keep these as separate capabilities.
+These three must not consume credits or start the normal action cooldown.
 
-- `write_file(path, content)` writes normal agent workspace files.
-- `write_to_scratchpad(content)` has no path argument and writes the actor's canonical private scratchpad.
+This is intentional and must be preserved during refactoring.
 
-The special scratchpad path must be derived by the backend, not trusted from model input.
+A tool's cost must never be enforced inside the tool implementation.
 
-## Results
+## File vs scratchpad
 
-Use `ToolResult` for structured results:
+Keep these capabilities distinct.
 
-- `success`
-- `output`
-- `error`
-- `exit_code`
-- `metadata`
+### `write_file(path, content)`
 
-Preserve exit codes and stderr where possible. Do not make a failed shell command look successful merely because a later `echo` succeeded.
+Writes a normal file inside the actor's sandbox workspace.
+
+The path is validated/scoped by `SandboxManager`.
+
+### `write_to_scratchpad(content)`
+
+Writes the actor's private canonical scratchpad.
+
+It has no path argument.
+
+The backend derives the scratchpad location from the acting sandbox user.
+
+Scratchpad use is voluntary. Never automatically write model output into the scratchpad.
+
+## Tool results
+
+Use `ToolResult` for structured tool results.
+
+Preserve:
+
+- success/failure
+- stdout/output
+- error/stderr where available
+- exit code
+- relevant metadata
+
+Do not turn failed commands into successful results.
+
+Do not put hidden reasoning into `ToolResult`.
+
+## Registry
+
+`ToolRegistry` is responsible for:
+
+- registering tools
+- looking up tools
+- filtering tools by actor
+- supplying the tool objects used to build native model tool definitions
+
+It should not execute tools.
+
+It should not enforce credits or cooldowns.
+
+## Adding a tool
+
+1. Define the typed tool class.
+2. Set its allowed agents.
+3. Set its `ToolCost`.
+4. Implement `execute()` through `ToolExecutionContext`.
+5. Register it.
+6. Add a context method only if the capability needs one.
+7. Add the Engine adapter/context implementation if required.
+8. Add authorization and execution tests.
+
+Do not add custom model-output parsing for a new tool.
 
 ## V1 security posture
 
-Commands inside the sandbox are game actions. Do not add generic dangerous-command filtering. The important security boundary is the Solari sandbox itself and the Engine's authorization of capabilities.
+Sandbox commands are game actions. Do not add generic dangerous-command filtering merely because a command looks dangerous.
+
+The important V1 security boundaries are:
+
+- Solari sandbox isolation
+- no host secrets in the sandbox
+- Engine-side authorization
+- resource/time limits
+- actor-specific filesystem permissions
+- server-authoritative match results

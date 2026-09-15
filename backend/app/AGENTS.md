@@ -4,39 +4,56 @@
 
 `app/` contains Arbiter's application domains:
 
-- `agents/`: LLM agents and tool capabilities
+- `agents/`: LLM agents and native deferred tool definitions
 - `engine/`: authoritative match runtime
 - `sandbox/`: Solari integration and sandbox lifecycle
-- `observability/`: Langfuse telemetry boundary
+- `observability/`: Logfire/OpenTelemetry telemetry boundary
 - `api/`: HTTP/API adapters
 - `db/`: persistence
-- `logger/`: local logging
+- `logger/`: application logging
 
 ## Ownership
 
 Put behavior in the domain that owns the concept.
 
 - Match rules -> `engine`
-- Agent decisions -> `agents`
-- Tool capabilities -> `agents/tools`
-- Solari operations -> `sandbox`
+- Agent/model interaction -> `agents`
+- Tool capabilities/contracts -> `agents/tools`
+- Sandbox execution -> `sandbox`
 - Telemetry -> `observability`
 - HTTP -> `api`
 - Persistence -> `db`
-- Human-readable application logs -> `logger`
+- Local application logs -> `logger`
 
-## Dependency direction
+## Core runtime boundary
 
 ```text
-api -> engine
-engine -> agents/tools
-engine -> sandbox
-engine -> observability
-sandbox -> Solari
+Pydantic AI
+    |
+    | native deferred tool call
+    v
+Engine
+    |
+    | authorize + budget + game rules
+    v
+Tool
+    |
+    v
+ToolExecutionContext
+    |
+    v
+SandboxManager
+    |
+    v
+Solari
 ```
 
-Lower-level packages should not import Engine game logic.
+The model must never bypass the Engine to execute a tool.
+
+The Engine must never bypass `SandboxManager` to perform sandbox operations.
 
 ## V1
 
-The current focus is the core Prisoner-vs-Warden runtime around a deterministic read-secret challenge. Avoid adding infrastructure that is not needed for the core match loop.
+The current focus is the core Prisoner-vs-Warden runtime around deterministic developer-authored challenges.
+
+Keep the implementation small and explicit. Avoid abstractions whose only purpose is to recreate functionality already provided by Pydantic AI or `SandboxManager`.

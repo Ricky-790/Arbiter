@@ -7,11 +7,9 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-import logfire
 from pydantic_ai import ToolReturn
 
 from app.agents.models import AgentType
-from app.agents.tokens import count_tokens, lower_limit_notice, lower_token_limit
 from app.agents.tools import ToolCall, ToolExecutionContext, ToolRegistry, ToolResult
 from app.agents.tools.registry import build_default_registry
 from app.logger import get_logger
@@ -30,8 +28,10 @@ from .models import MatchState, MatchStatus, utc_now
 from .traps import TRAP_TOOL_NAMES, TrapManager
 
 logger = get_logger()
-# logfire.configure()
-# logfire.instrument_pydantic_ai()
+
+#: Tools exempt from credit deduction and action cooldown. File and
+#: scratchpad access is free by design; everything else is budgeted.
+FREE_TOOL_NAMES = frozenset({"read_file", "write_file", "write_to_scratchpad"})
 
 
 @runtime_checkable
@@ -173,7 +173,9 @@ class Engine:
 
     async def execute_tool_call(self, actor: AgentType, call: ToolCall) -> ToolResult:
         """Validate, charge, cool down, and delegate one agent-requested action."""
-        async with self._action_lock:
+        async with (
+            self._action_lock  # Makes sure only one async task can access a shared resource
+        ):
             if self.state.status is not MatchStatus.RUNNING:
                 logger.warning("Match not running")
                 record_match_event(
@@ -249,8 +251,11 @@ class Engine:
                     )
                     return ToolResult(success=False, error=trap_error)
 
-            self.credits.deduct(self.state, actor, tool.cost)
-            self.cooldowns.start(self.state, actor)
+            # Free tools (file/scratchpad access) skip budgeting entirely:
+            # no credit deduction, no action cooldown.
+            if call.name not in FREE_TOOL_NAMES:
+                self.credits.deduct(self.state, actor, tool.cost)
+                self.cooldowns.start(self.state, actor)
             context = EngineExecutionContext(self, actor)
             with tool_execution_span(
                 match_id=self.state.match_id, actor=actor.value, tool=call.name
@@ -266,7 +271,6 @@ class Engine:
                     **output_telemetry(result.output),
                 },
             )
-            result = self._attach_long_output_notice(actor, result)
             self._agent_state(actor).last_result = result
             self._record(
                 "tool_result", actor=actor.value, tool=call.name, success=result.success
@@ -383,7 +387,7 @@ class Engine:
         if binder is not None:
             binder(
                 lambda tool_name, args: self._execute_deferred_tool(
-                    actor, source, tool_name, args
+                    actor, tool_name, args
                 )
             )
         while not self._stop_event.is_set():
@@ -405,16 +409,15 @@ class Engine:
     async def _execute_deferred_tool(
         self,
         actor: AgentType,
-        source: AgentActionSource,
         tool_name: str,
         args: dict[str, Any] | None,
     ) -> Any:
-        """Native deferred-tool executor: pace, execute, observe, map.
+        """Native deferred-tool executor: pace, execute, map.
 
         Waits for the actor's cooldown (preserving one-action-per-window
         pacing inside native runs), executes through the authoritative
-        ``execute_tool_call`` path, records the pair for the JSON history,
-        and maps the engine result to a Pydantic AI tool return value.
+        ``execute_tool_call`` path, and maps the engine result to a
+        Pydantic AI tool return value.
         """
         while (
             not self._stop_event.is_set()
@@ -432,12 +435,6 @@ class Engine:
         except Exception as error:
             logger.exception(f"[{actor}] tool execution raised")
             result = ToolResult(success=False, error=f"Tool execution failed: {error}")
-        observe = getattr(source, "observe_result", None)
-        if observe is not None:
-            try:
-                await observe(call, result)
-            except Exception:
-                logger.exception(f"[{actor}] observe_result failed")
         logger.info(
             f"ToolResult[{actor}]: success={result.success}, output={result.output}, error={result.error}, metadata={result.metadata}"
         )
@@ -460,25 +457,6 @@ class Engine:
                 f"printf %s {shlex.quote(content)} > {shlex.quote(path)} && chmod 600 {shlex.quote(path)}"
             )
         return commands
-
-    @staticmethod
-    def _attach_long_output_notice(actor: AgentType, result: ToolResult) -> ToolResult:
-        """Attach a scratchpad/narrowing suggestion when output is long.
-
-        Outputs are never hidden or redacted; long ones just carry guidance
-        in ``notice``.
-        """
-        token_count = count_tokens(result.output or "")
-        lower = lower_token_limit()
-        if token_count > lower:
-            logger.info(
-                f"[{actor}] tool output ({token_count} tokens > long-output "
-                f"limit {lower}): attaching scratchpad suggestion."
-            )
-            return result.model_copy(
-                update={"notice": lower_limit_notice(token_count, lower)}
-            )
-        return result
 
     def _sandbox_user(self, actor: AgentType) -> str:
         challenge = self.state.challenge

@@ -51,7 +51,7 @@ _SKIP_REASON = None
 class LiveEndToEndGameTests(unittest.IsolatedAsyncioTestCase):
     async def test_prisoner_and_warden_play_a_live_protected_secret_match(self) -> None:
         # model_name = os.environ["ARBITER_LIVE_MODEL"]
-        timeout_seconds = float(os.getenv("ARBITER_LIVE_TIMEOUT_SECONDS", "300"))
+        timeout_seconds = float(os.getenv("ARBITER_LIVE_TIMEOUT_SECONDS", "150"))
         manager = SandboxManager()
         engine = Engine(
             match_id="live-protected-secret",

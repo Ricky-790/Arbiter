@@ -27,6 +27,15 @@ class FakeSandboxManager:
     async def run_command(self, **kwargs: object) -> ToolResult:
         return await self._record("run_command", **kwargs)
 
+    async def read_file(self, **kwargs: object) -> ToolResult:
+        return await self._record("read_file", **kwargs)
+
+    async def write_file(self, **kwargs: object) -> ToolResult:
+        return await self._record("write_file", **kwargs)
+
+    async def write_to_scratchpad(self, **kwargs: object) -> ToolResult:
+        return await self._record("write_to_scratchpad", **kwargs)
+
     async def watch_file(self, **kwargs: object) -> ToolResult:
         return await self._record("watch_file", **kwargs)
 
@@ -111,7 +120,6 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(rearm.success)
         self.assertIn("cannot be re-armed", rearm.error or "")
         self.assertTrue(reaction.success)
-
     async def test_engine_evaluates_flag_submission_and_finishes_match(self) -> None:
         engine, _ = self.make_engine()
         await engine.start()
@@ -124,3 +132,24 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.success)
         self.assertEqual(engine.state.status, MatchStatus.FINISHED)
         self.assertEqual(engine.state.winner, AgentType.PRISONER)
+
+    async def test_free_tools_skip_credits_and_cooldown(self) -> None:
+        engine, _ = self.make_engine()
+        await engine.start()
+
+        read = await engine.execute_tool_call(
+            AgentType.PRISONER, ToolCall(name="read_file", arguments={"path": "a.txt"})
+        )
+        scratch = await engine.execute_tool_call(
+            AgentType.PRISONER,
+            ToolCall(name="write_to_scratchpad", arguments={"content": "note"}),
+        )
+        # A charged action immediately after is not cooldown-rejected.
+        bash = await engine.execute_tool_call(
+            AgentType.PRISONER, ToolCall(name="bash", arguments={"command": "id"})
+        )
+
+        self.assertTrue(read.success)
+        self.assertTrue(scratch.success)
+        self.assertTrue(bash.success)
+        self.assertEqual(engine.state.prisoner.credits, 48)

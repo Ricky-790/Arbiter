@@ -1,59 +1,39 @@
-import json
 import os
 import unittest
 
+from app.agents.base import _build_tool_definitions
 from app.agents.models import AgentType
-from app.agents.prisoner import PrisonerAgent
 from app.agents.tools.models import ToolCall, ToolResult
 from app.engine import Engine
 from app.sandbox.models import ChallengeSpec
 
 
-class AgentMemoryTests(unittest.TestCase):
-    def test_pair_json_carries_reason_and_result_fields(self) -> None:
-        agent = PrisonerAgent()
-        call = ToolCall(
-            name="bash", arguments={"command": "ls"}, reason="list files first"
-        )
-        result = ToolResult(success=True, output="a.txt", exit_code=0)
-        agent._observations.append((call, result))
+class NativeToolDefinitionTests(unittest.TestCase):
+    def test_definitions_cover_allowed_tools_with_typed_schemas(self) -> None:
+        from app.agents.tools import build_default_registry
 
-        rendered = agent._format_recent_observations()
-        self.assertEqual(len(rendered), 1)
-        entry = json.loads(rendered[0])
-        self.assertEqual(entry["tool_call"]["reason"], "list files first")
-        self.assertEqual(entry["tool_call"]["arguments"], {"command": "ls"})
-        self.assertEqual(entry["tool_result"]["output"], "a.txt")
-        self.assertTrue(entry["tool_result"]["success"])
-        self.assertEqual(entry["tool_result"]["exit_code"], 0)
-        self.assertNotIn("notice", entry["tool_result"])
-
-    def test_long_outputs_are_never_hidden(self) -> None:
-        agent = PrisonerAgent()
-        big = "line " + "x " * 200
-        call = ToolCall(name="bash", arguments={"command": "ls -la /"}, reason="r")
-        result = ToolResult(
-            success=True,
-            output=big,
-            exit_code=0,
-            notice="long output suggestion",
-        )
-        import asyncio
-
-        asyncio.run(agent.observe_result(call, result))
-        asyncio.run(
-            agent.observe_result(
-                ToolCall(name="pass", arguments={}, reason="done"),
-                ToolResult(success=True, output="ok"),
+        registry = build_default_registry()
+        defs = {
+            d.name: d
+            for d in _build_tool_definitions(
+                registry, {"bash", "block_network", "pass"}
             )
-        )
-        entries = [json.loads(e) for e in agent._format_recent_observations()]
-        # Full output retained even after aging out of most-recent.
-        self.assertIn("x x x", entries[0]["tool_result"]["output"])
-        self.assertEqual(
-            entries[0]["tool_result"]["notice"], "long output suggestion"
-        )
-        self.assertEqual(entries[1]["tool_result"]["output"], "ok")
+        }
+        self.assertEqual(set(defs), {"bash", "block_network", "pass"})
+        bash_schema = defs["bash"].parameters_json_schema
+        self.assertEqual(bash_schema["properties"]["command"]["type"], "string")
+        self.assertIn("command", bash_schema["required"])
+        block_schema = defs["block_network"].parameters_json_schema
+        self.assertNotIn("ip", block_schema["required"])
+        self.assertNotIn("port", block_schema["required"])
+        self.assertEqual(defs["pass"].parameters_json_schema["required"], [])
+
+    def test_unknown_allowed_names_are_skipped(self) -> None:
+        from app.agents.tools import build_default_registry
+
+        registry = build_default_registry()
+        defs = _build_tool_definitions(registry, {"bash", "no_such_tool"})
+        self.assertEqual([d.name for d in defs], ["bash"])
 
 
 class FakeSandboxManager:
@@ -88,7 +68,7 @@ class LongOutputNoticeTests(unittest.IsolatedAsyncioTestCase):
         await engine.start()
         result = await engine.execute_tool_call(
             AgentType.PRISONER,
-            ToolCall(name="bash", arguments={"command": "ls -la /"}, reason="r"),
+            ToolCall(name="bash", arguments={"command": "ls -la /"}),
         )
         self.assertTrue(result.success)
         # Never hidden: full output still present...

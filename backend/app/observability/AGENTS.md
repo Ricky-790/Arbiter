@@ -4,226 +4,37 @@
 
 `app/observability/` is Arbiter's observability boundary.
 
-Arbiter uses **Pydantic Logfire** for application and AI observability. Logfire is built on OpenTelemetry and has first-class instrumentation for Pydantic AI, including agent runs, model calls, tool calls, retries, errors, token usage, latency, and cost information.
+Arbiter uses Pydantic Logfire with OpenTelemetry.
 
-The goal of this package is **not** to build a custom telemetry system. It exists to:
+The package should:
 
 1. configure Logfire
-2. provide a small Arbiter-specific observability facade where needed
-3. record match-specific information that automatic instrumentation cannot know about
-4. keep Logfire-specific implementation details out of the Engine, agents, and tools
+2. enable Pydantic AI instrumentation
+3. expose a small Arbiter-specific telemetry facade
+4. record match/game information that automatic instrumentation does not know
+5. keep telemetry implementation details out of Engine, agents, and tools
 
-## Why Logfire
+Do not build a custom tracing system.
 
-Arbiter uses Pydantic AI heavily, so Logfire is a natural fit.
+## Deferred tool calling
 
-Pydantic AI can be instrumented directly with Logfire, allowing model and agent execution to appear as traces without manually wrapping every LLM call.
+Pydantic AI is responsible for normal model/tool-call telemetry.
 
-Logfire also provides:
-
-- LLM/model call tracing
-- token usage
-- latency
-- cost information
-- tool call inspection
-- retry visibility
-- errors/exceptions
-- application traces
-- HTTP/database/infrastructure instrumentation through OpenTelemetry
-- SQL-based querying of telemetry
-
-Do not introduce Langfuse solely for LLM tracing.
-
-Evaluation datasets, LLM-as-a-judge, prompt experiments, and similar evaluation workflows are **not part of Arbiter's current observability requirements**.
-
-Arbiter is primarily an adversarial benchmark/game runtime rather than a traditional dataset-based LLM evaluation application.
-
-If evaluation functionality is added later, it should be evaluated separately rather than making the observability layer depend on it.
-
-## Architecture
-
-The intended dependency direction is:
+Agents use native deferred tool calls:
 
 ```text
-                    Arbiter
-                       │
-        ┌──────────────┼──────────────┐
-        │              │              │
-      Engine         Agents        Sandbox
-        │              │              │
-        └──────────────┼──────────────┘
-                       │
-                       ▼
-                observability/
-                       │
-                       ▼
-                    Logfire
-                       │
-                       ▼
-                OpenTelemetry
+model
+ -> native tool request
+ -> deferred handler
+ -> Engine
+ -> Tool
+ -> result
+ -> model
 ```
 
-The rest of the application should depend on Arbiter's observability interface where custom events are needed.
+The Engine is authoritative for actual tool execution.
 
-Only this package should contain direct Logfire-specific application code unless automatic instrumentation requires initialization elsewhere.
-
-## Automatic Pydantic AI instrumentation
-
-Pydantic AI should be instrumented through Logfire rather than manually recording every model request.
-
-Typical application initialization should configure Logfire and enable Pydantic AI instrumentation:
-
-```python
-import logfire
-
-logfire.configure()
-logfire.instrument_pydantic_ai()
-```
-
-The exact initialization location should follow the application's existing startup structure.
-
-Do not add manual telemetry around every call to:
-
-```python
-await agent.run(...)
-```
-
-if Logfire's Pydantic AI instrumentation already captures the operation.
-
-Automatic instrumentation should provide visibility into:
-
-- agent runs
-- model requests
-- model responses
-- token usage
-- latency
-- retries
-- errors
-- tool calls executed by Pydantic AI
-
-## Arbiter-specific telemetry
-
-Logfire automatically knows about LLM/application execution, but it does not automatically know all of Arbiter's game concepts.
-
-The observability layer should therefore expose a small set of Arbiter-specific operations.
-
-Conceptually:
-
-```python
-observability.start_match(...)
-observability.record_match_event(...)
-observability.record_tool_execution(...)
-observability.record_sandbox_event(...)
-observability.finish_match(...)
-```
-
-The exact API can change as implementation evolves.
-
-Do not create wrappers for things Logfire already instruments automatically.
-
-For example, do not create:
-
-```python
-observability.record_llm_call(...)
-```
-
-unless there is a specific Arbiter-specific reason to do so.
-
-Pydantic AI + Logfire should handle normal LLM call instrumentation.
-
-## Match traces
-
-A single Arbiter match should be represented as one logical trace.
-
-The trace should contain metadata such as:
-
-```text
-match_id
-challenge
-prisoner_model
-warden_model
-provider
-environment/version
-```
-
-The trace should eventually make it possible to inspect something like:
-
-```text
-Match abc123
-│
-├── Prisoner agent run
-│   ├── LLM generation
-│   ├── bash tool
-│   ├── LLM generation
-│   ├── read_file tool
-│   └── submit_flag
-│
-├── Warden agent run
-│   ├── LLM generation
-│   ├── bash tool
-│   ├── trap tool
-│   └── ...
-│
-├── sandbox events
-│
-└── match finished
-    ├── winner
-    ├── reason
-    └── duration
-```
-
-The exact Logfire span hierarchy should follow OpenTelemetry/Logfire conventions rather than introducing a custom tracing model.
-
-## Match metadata
-
-Useful match-level metadata includes:
-
-- `match_id`
-- challenge ID/name
-- Prisoner model
-- Warden model
-- provider
-- match start time
-- match end time
-- winner
-- finish reason
-- match duration
-- application version
-
-Use structured attributes/metadata rather than embedding all information into human-readable log strings.
-
-## Tool telemetry
-
-The Engine is authoritative for tool execution.
-
-When a tool is executed, the observability layer may record:
-
-- `match_id`
-- actor
-- tool name
-- duration
-- success/failure
-- exit code
-- credits charged
-- cooldown information
-- failure category
-- relevant metadata
-
-Useful failure categories include:
-
-```text
-tool_not_found
-tool_not_allowed
-cooldown
-insufficient_credits
-invalid_arguments
-execution_failure
-provider_error
-```
-
-An Engine-rejected tool call should not be represented as a successful tool execution.
-
-Where possible, distinguish:
+Observability should distinguish, where practical:
 
 ```text
 requested
@@ -233,255 +44,129 @@ successful
 failed
 ```
 
-This makes later analysis of agent behavior much more useful.
+A model requesting a tool does not mean the action was successfully executed.
 
-## LLM telemetry
+## Match telemetry
 
-Normal LLM telemetry should come from Pydantic AI + Logfire instrumentation.
+A match should be identifiable by:
 
-Useful fields include:
-
+- match_id
+- challenge
+- Prisoner model
+- Warden model
 - provider
-- model
-- input tokens
-- output tokens
-- total token usage where available
+- application/environment version
+- winner
+- finish reason
+- duration
+
+Prisoner and Warden telemetry must remain distinguishable.
+
+Do not use mutable global state such as `current_match` or `current_agent`.
+
+## Automatic Pydantic AI instrumentation
+
+Prefer Pydantic AI + Logfire instrumentation for:
+
+- model calls
+- agent runs
+- native tool-call requests
+- deferred tool interactions
+- token usage
 - latency
+- provider errors
 - retries
-- errors
-- request/response information where safe
 
-Do not manually calculate token counts if the provider already supplies authoritative usage information.
+Do not manually wrap every `agent.run()` call when automatic instrumentation already provides the information.
 
-Different providers may expose different usage information. Missing values should remain missing rather than being fabricated.
+Do not manually calculate token counts if the provider supplies authoritative usage data.
 
-## Agent concurrency
+## Engine-specific events
 
-Prisoner and Warden execute concurrently.
+The Engine may emit structured events for:
 
-Do not use mutable global state such as:
+- match started
+- match finished
+- tool requested
+- tool rejected
+- tool executed
+- tool failed
+- sandbox event
+- trap triggered
+- provider/agent error
 
-```python
-current_match
-current_agent
-current_trace
-```
+Useful tool attributes include:
 
-to determine which telemetry event belongs to which match.
+- actor
+- tool name
+- duration
+- success
+- exit code
+- credits charged
+- cooldown information
+- failure category
 
-Always associate custom telemetry explicitly with:
+## Security
 
-```text
-match_id
-agent/actor
-```
+Never record:
 
-Use task-local/context propagation only where it is safe and supported.
-
-## Match events
-
-The Engine may eventually emit structured events such as:
-
-```text
-MATCH_STARTED
-AGENT_LLM_STARTED
-AGENT_LLM_COMPLETED
-TOOL_STARTED
-TOOL_COMPLETED
-TOOL_FAILED
-SANDBOX_EVENT
-TRAP_TRIGGERED
-AGENT_ERROR
-MATCH_FINISHED
-```
-
-These are Arbiter concepts.
-
-They should not require the rest of the application to understand Logfire's internal APIs.
-
-A useful architecture is:
-
-```text
-Engine
-   │
-   ▼
-Arbiter event
-   │
-   ├── Logger
-   ├── Logfire
-   ├── future WebSocket
-   └── future database
-```
-
-This keeps the Engine from becoming tightly coupled to a specific telemetry backend.
-
-## Sandbox telemetry
-
-Sandbox events are especially useful for Arbiter because the sandbox is the actual game environment.
-
-Potential events include:
-
-- process started
-- process stopped
-- file created
-- file modified
-- file deleted
-- network activity
-- trap-triggering activity
-
-Only record events that are actually available from the Solari integration.
-
-Do not invent sandbox telemetry that the underlying provider cannot reliably observe.
-
-## Security and secrets
-
-Observability must not become a mechanism for leaking credentials.
-
-Never send to Logfire:
-
-- provider API keys
-- BYOK API keys
+- API keys
+- BYOK credentials
 - database passwords
 - JWT secrets
 - Solari credentials
 - host environment secrets
 
-Tool arguments and command output can potentially contain secrets discovered inside the sandbox.
+Sandbox command output is adversarial and may contain discovered secrets.
 
-Apply redaction or truncation where appropriate before recording them.
+Use truncation/redaction before recording arbitrary output.
 
-Remember:
-
-> The sandbox is adversarial by design.
-
-Therefore, arbitrary command output should not automatically be treated as safe telemetry.
+Never treat telemetry as a trusted source of match truth.
 
 ## Large outputs
 
-Agents may intentionally execute commands producing very large outputs.
+Do not send unlimited sandbox output to Logfire.
 
-Do not blindly send unlimited stdout/stderr to Logfire.
-
-Use configurable limits.
-
-A useful recorded representation can contain:
+Prefer structured metadata such as:
 
 ```text
-success
-exit_code
 output_size
 truncated
 output_preview
+exit_code
+success
 ```
 
-For example:
+## Failure isolation
 
-```text
-output_size = 18342 bytes
-truncated = true
-```
+Telemetry must never affect match execution.
 
-This keeps observability useful without turning a single `ls`, `find`, or log command into a huge telemetry payload.
-
-## Observability must never affect the match
-
-Telemetry is secondary to game execution.
-
-If Logfire is temporarily unavailable:
+If Logfire is unavailable:
 
 ```text
 match continues
 agent continues
 tool execution continues
 sandbox continues
-match result remains valid
 ```
 
-A failure to send telemetry must never cause:
-
-```python
-raise
-```
-
-to propagate into the match loop merely because Logfire is unavailable.
-
-Telemetry errors should be caught and reported through normal application logging.
-
-## Logging vs observability
-
-Use the existing logger for immediate local debugging.
-
-Use Logfire for structured traces and cross-component investigation.
-
-Do not duplicate every ordinary log line into custom Logfire events.
-
-The two systems serve different purposes:
-
-```text
-Logger
-    -> local operational/debug output
-
-Logfire
-    -> structured traces, spans, metrics, LLM/tool observability
-```
+Telemetry errors should be handled as observability failures, not match failures.
 
 ## V1 scope
 
-The initial observability implementation should be small.
+Keep observability small:
 
-Priority:
+- configure Logfire
+- instrument Pydantic AI
+- associate match/actor metadata
+- record important Engine/tool events
+- capture token usage/latency automatically
+- record errors/retries
 
-1. configure Logfire
-2. instrument Pydantic AI
-3. associate agent/match metadata with traces
-4. record match start/finish
-5. record important Engine/tool events
-6. capture token usage and latency automatically
-7. record failures and retries
-8. ensure telemetry failures cannot break matches
+Do not build:
 
-Do **not** build:
-
-- an evaluation framework
 - datasets
 - LLM-as-a-judge
-- custom experiment infrastructure
-- a custom tracing backend
-- a second telemetry database
-
-Those are separate future concerns.
-
-## Future benchmarking
-
-Arbiter will eventually be able to use its telemetry as benchmark data.
-
-Potential metrics include:
-
-- Prisoner win rate
-- Warden win rate
-- time to solve
-- number of actions
-- number of successful tool calls
-- failed tool-call rate
-- credits consumed
-- token consumption
-- LLM latency
-- provider failure rate
-- timeout rate
-
-These should initially be derived from recorded match telemetry rather than requiring a separate evaluation framework.
-
-The distinction is important:
-
-```text
-Observability
-    "What happened during this match?"
-
-Benchmarking
-    "How did this model perform across many matches?"
-
-Evaluation
-    "Does this model/system satisfy a predefined quality criterion?"
-```
-
-Arbiter currently needs the first two much more than the third.
+- experiment infrastructure
+- custom evaluation framework
+- custom tracing backend
