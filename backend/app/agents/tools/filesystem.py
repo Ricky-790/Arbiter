@@ -12,7 +12,8 @@ class ReadFileTool(BaseTool):
         super().__init__(
             name="read_file",
             description=(
-                "Read the contents of a file. Runs with your own user permissions; files you cannot read will fail."
+                "Read the contents of a file. Runs with your own user permissions; files you cannot read will fail. "
+                "File access is scoped to your own home directory (/home/prisoner for the Prisoner, /home/warden for the Warden); all paths resolve under /home/<you>/."
             ),
             allowed_agents=frozenset({AgentType.PRISONER, AgentType.WARDEN}),
             cost=ToolCost.READ_FILE,
@@ -29,7 +30,8 @@ class WriteFileTool(BaseTool):
         super().__init__(
             name="write_file",
             description=(
-                "Write content to a file at the given absolute path(including extension). Parent directories are created as needed. File paths will be prepended with a fixed dir route, to allow only writing to specific locations."
+                "Write content to a file at the given absolute path(including extension). Parent directories are created as needed. File paths will be prepended with a fixed dir route, to allow only writing to specific locations. "
+                "File access is scoped to your own home directory (/home/prisoner for the Prisoner, /home/warden for the Warden); all paths resolve under /home/<you>/."
             ),
             allowed_agents=frozenset({AgentType.PRISONER, AgentType.WARDEN}),
             cost=ToolCost.WRITE_FILE,

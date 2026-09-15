@@ -26,6 +26,15 @@ from .tools.registry import ToolRegistry
 logger = get_logger()
 
 
+class AgentUnavailableError(Exception):
+    """Signal that the model provider stayed irresponsive after retries.
+
+    Raised by :meth:`ToolChoosingAgent.run_turn` only when bounded retries
+    for retryable provider errors (429/503/504) are exhausted. The Engine
+    catches this to stop the match; agents never decide winners themselves.
+    """
+
+
 def _function_signature_to_json_schema(tool: Any) -> dict[str, Any]:
     """Build a minimal JSON schema for a BaseTool's execute() method."""
     sig = inspect.signature(tool.execute)
@@ -155,6 +164,13 @@ class ToolChoosingAgent:
 
         self._message_history: list[Any] | None = None
 
+        # Consecutive failed (non-scripted) turns. A single provider error
+        # returns None so a transient blip doesn't kill the match, but a
+        # persistently failing provider (e.g. a model/endpoint that never
+        # supports tool use) raises AgentUnavailableError once the threshold
+        # is reached, letting the Engine stop the match.
+        self._consecutive_failures: int = 0
+
     def bind_tool_executor(
         self,
         executor: Callable[[str, dict[str, Any]], Awaitable[Any]],
@@ -186,8 +202,15 @@ class ToolChoosingAgent:
         """Run one native agent turn, resolving tools inline via the handler.
 
         Returns the model's final text output, or None when the turn
-        produced nothing usable (scripted mode, rate limits exhausted,
-        provider errors). Message history carries over across turns.
+        produced nothing usable (scripted mode, isolated transient failure).
+        Message history carries over across turns.
+
+        Raises:
+            AgentUnavailableError: if retryable provider errors (429/503/504)
+                persist after bounded in-turn retries, or if non-retryable
+                failures repeat across consecutive turns (the provider is
+                never going to succeed). The Engine handles this by stopping
+                the match.
         """
         if self._scripted_calls:
             call = self._scripted_calls.popleft()
@@ -203,14 +226,18 @@ class ToolChoosingAgent:
         if self.objective:
             prompt += f"\nCurrent match objective: {self.objective}"
         prompt += f"\nYour scratchpad:\n<scratchpad>{scratchpad}</scratchpad>"
-        for _ in range(3):
+        max_retries = 3
+        last_status: int | None = None
+        for _ in range(max_retries):
             try:
                 result = await self._agent.run(
                     prompt, message_history=self._message_history
                 )
                 self._message_history = result.all_messages()
             except ModelHTTPError as e:
-                if e.status_code == 429:
+                status = e.status_code
+                if status == 429:
+                    last_status = status
                     logger.critical(f"Model rate limit exceeded: {e}")
                     raw_wait = e.headers.get("retry-after", 30) if e.headers else 30
                     try:
@@ -219,17 +246,44 @@ class ToolChoosingAgent:
                         sleep_time = 30.0
                     await asyncio.sleep(sleep_time)
                     continue
-                else:
-                    logger.error(f"Model HTTP error: {e}")
-                    return None
+                if status in (503, 504):
+                    last_status = status
+                    logger.critical(f"Model temporarily unavailable ({status}): {e}")
+                    await asyncio.sleep(30.0)
+                    continue
+                logger.error(f"Model HTTP error: {e}")
+                self._record_failure()
+                return None
             except Exception as e:
                 logger.error(f"Unexpected error: {e}")
+                self._record_failure()
                 return None
             if isinstance(result.output, str):
+                self._consecutive_failures = 0
                 return result.output
             logger.error(
                 f"Unexpected agent output type: {type(result.output).__name__}"
             )
+            self._record_failure()
             return None
-        logger.critical("Max retries exceeded for tool call generation.")
-        return None
+        raise AgentUnavailableError(
+            f"Model unavailable after {max_retries} retries"
+            + (f" (last status {last_status})" if last_status is not None else "")
+        )
+
+    #: How many failed turns in a row before the agent is declared unavailable.
+    _max_consecutive_failures: int = 3
+
+    def _record_failure(self) -> None:
+        """Count one failed turn; raise when the provider never recovers.
+
+        A single failure returns None (transient blip); only persistent
+        failure across consecutive turns raises, so the Engine stops the
+        match instead of looping forever.
+        """
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= self._max_consecutive_failures:
+            raise AgentUnavailableError(
+                f"Model unavailable after {self._consecutive_failures} "
+                "consecutive failed turns"
+            )

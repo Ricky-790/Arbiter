@@ -33,18 +33,15 @@ liquid_ai_lfm = OpenRouterModel(
 minimax_m3 = OpenAIChatModel(
     model_name="minimaxai/minimax-m3", provider=nvidia_provider
 )
-nex_n2_5 = OpenRouterModel(
-    model_name="nex-agi/nex-n2.5-pro:free", provider=openrouter_provider
+ling_3_flash = OpenRouterModel(
+    model_name="inclusionai/ling-3.0-flash-vl:free", provider=openrouter_provider
 )
-glm_5_3 = OpenAIChatModel(
-    model_name="z-ai/glm-5.3-free", provider=token_router_provider
-)
-
+glm_5_2 = OpenRouterModel(model_name="z-ai/glm-5.2:free", provider=openrouter_provider)
 agent_mapper = {
     "laguna-xs-2.1": laguna,
     "gemini-3.1-flash-lite": gemini_3_1,
     "lfm-2.5-2.6b": liquid_ai_lfm,
     "minimax-m3": minimax_m3,
-    "nex-n2.5-pro": nex_n2_5,
-    "glm-5.3": glm_5_3,
+    "ling-3.0-flash": ling_3_flash,
+    "glm-5.2": glm_5_2,
 }

@@ -9,6 +9,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from pydantic_ai import ToolReturn
 
+from app.agents.base import AgentUnavailableError
 from app.agents.models import AgentType
 from app.agents.tools import ToolCall, ToolExecutionContext, ToolRegistry, ToolResult
 from app.agents.tools.registry import build_default_registry
@@ -399,6 +400,16 @@ class Engine:
                 output = await source.run_turn(scratchpad)
             except asyncio.CancelledError:
                 raise
+            except AgentUnavailableError as unavailable:
+                winner = (
+                    AgentType.WARDEN
+                    if actor is AgentType.PRISONER
+                    else AgentType.PRISONER
+                )
+                end_reason = f"{actor.value} agent not available: {unavailable}"
+                logger.critical(f"[{actor}] {end_reason}")
+                self.finish(winner=winner, end_reason=end_reason)
+                return
             except Exception:
                 logger.exception(f"[{actor}] agent turn failed")
                 await asyncio.sleep(1.0)
