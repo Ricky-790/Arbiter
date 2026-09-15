@@ -17,7 +17,9 @@ nvidia_provider = OpenAIProvider(
     base_url="https://integrate.api.nvidia.com/v1",
     api_key=os.getenv("NVIDIA_API_KEY", ""),
 )
-
+token_router_provider = OpenAIProvider(
+    base_url="https://api.tokenrouter.com/v1", api_key=os.getenv("TOKENROUTER_API_KEY")
+)
 # groq_provider = GroqProvider()
 openrouter_provider = OpenRouterProvider()
 google_provider = GoogleProvider(api_key=os.getenv("GOOGLE_API_KEY", ""))
@@ -34,6 +36,9 @@ minimax_m3 = OpenAIChatModel(
 nex_n2_5 = OpenRouterModel(
     model_name="nex-agi/nex-n2.5-pro:free", provider=openrouter_provider
 )
+glm_5_3 = OpenAIChatModel(
+    model_name="z-ai/glm-5.3-free", provider=token_router_provider
+)
 
 agent_mapper = {
     "laguna-xs-2.1": laguna,
@@ -41,4 +46,5 @@ agent_mapper = {
     "lfm-2.5-2.6b": liquid_ai_lfm,
     "minimax-m3": minimax_m3,
     "nex-n2.5-pro": nex_n2_5,
+    "glm-5.3": glm_5_3,
 }

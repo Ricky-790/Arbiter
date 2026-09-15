@@ -4,21 +4,24 @@ import asyncio
 import inspect
 import json
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from typing import TYPE_CHECKING, Any, Union, get_args, get_origin
 
-from pydantic_ai import Agent
+from pydantic_ai import (
+    Agent,
+    DeferredToolRequests,
+    DeferredToolResults,
+    RunContext,
+    ToolDefinition,
+)
+from pydantic_ai.capabilities import HandleDeferredToolCalls
 from pydantic_ai.exceptions import ModelHTTPError
+from pydantic_ai.toolsets.external import ExternalToolset
 
 # from tenacity import retry, stop_after_attempt, wait_exponential
 from app.logger import get_logger
 
 from .agents_directory import agent_mapper
-from .tokens import (
-    HIDDEN_OUTPUT_PLACEHOLDER,
-    count_tokens,
-    lower_token_limit,
-)
 from .tools.models import ToolCall, ToolResult
 
 if TYPE_CHECKING:
@@ -98,8 +101,86 @@ def _coerce_argument(
     return value
 
 
+def _function_signature_to_json_schema(tool: Any) -> dict[str, Any]:
+    """Build a minimal JSON schema for a BaseTool's execute() method."""
+    sig = inspect.signature(tool.execute)
+    properties: dict[str, Any] = {}
+    required: list[str] = []
+    for name, param in sig.parameters.items():
+        if name in {"self", "context"}:
+            continue
+        schema: dict[str, Any] = {}
+        annotation = param.annotation
+        if annotation is not inspect.Parameter.empty:
+            if annotation is str:
+                schema["type"] = "string"
+            elif annotation is int:
+                schema["type"] = "integer"
+            elif annotation is bool:
+                schema["type"] = "boolean"
+            elif annotation is float:
+                schema["type"] = "number"
+            else:
+                origin = get_origin(annotation)
+                if origin is Union or (hasattr(origin, "__origin__") and origin.__origin__ is Union):  # type: ignore[attr-defined]
+                    members = [m for m in get_args(annotation) if m is not type(None)]
+                    types: list[str] = []
+                    for m in members:
+                        if m is str:
+                            types.append("string")
+                        elif m is int:
+                            types.append("integer")
+                        else:
+                            types.append("object")
+                    if len(types) == 1:
+                        schema["type"] = types[0]
+                    else:
+                        schema["type"] = types
+                    if type(None) in get_args(annotation):
+                        schema["nullable"] = True
+                else:
+                    schema["type"] = "object"
+        else:
+            schema["type"] = "string"
+        properties[name] = schema
+        if param.default is inspect.Parameter.empty:
+            required.append(name)
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": False,
+    }
+
+
+def _build_tool_definitions(
+    registry: ToolRegistry, allowed_tools: set[str]
+) -> list[ToolDefinition]:
+    tool_defs: list[ToolDefinition] = []
+    for name in allowed_tools:
+        try:
+            tool = registry.get(name)
+        except KeyError:
+            continue
+        tool_defs.append(
+            ToolDefinition(
+                name=tool.name,
+                description=tool.description,
+                parameters_json_schema=_function_signature_to_json_schema(tool),
+                kind="external",
+            )
+        )
+    return tool_defs
+
+
 class ToolChoosingAgent:
-    """An LLM agent that returns a validated structured tool request."""
+    """An LLM agent that uses Pydantic AI native deferred tool calling.
+
+    The model is given the list of allowed tools as external/deferred tools.
+    A ``HandleDeferredToolCalls`` capability resolves each request inline
+    through an engine-bound executor, so one native ``agent.run()`` drives
+    the whole turn -- no manual request/resume loop.
+    """
 
     def __init__(
         self,
@@ -120,31 +201,83 @@ class ToolChoosingAgent:
             ) from error
         self.allowed_tools = allowed_tools
         self.objective = objective
-        self._agent = Agent(model, output_type=ToolCall, instructions=instructions)
+        self._scripted_calls = deque(scripted_calls or ())
+        self._scripted_mode = scripted_calls is not None
+
         if registry is None:
             from .tools.registry import build_default_registry
 
             registry = build_default_registry()
         self._registry = registry
+
+        tool_defs = _build_tool_definitions(registry, allowed_tools)
+
+        # Resolved per deferred request by the bound engine executor; None
+        # until the engine binds it (standalone/scripted use has no executor).
+        self._tool_executor: (
+            Callable[[str, dict[str, Any]], Awaitable[Any]] | None
+        ) = None
+
+        self._agent = Agent(
+            model,
+            output_type=[str, DeferredToolRequests],
+            instructions=instructions,
+            toolsets=[ExternalToolset(tool_defs)],
+            capabilities=[
+                HandleDeferredToolCalls(handler=self._handle_deferred_tools)
+            ],
+        )
+
+        self._message_history: list[Any] | None = None
+
         # Ordered (ToolCall, ToolResult) pairs; rendered as JSON in prompts so
-        # the LLM sees both its prior reasoning and each result. Never shared
+        # the LLM sees both its prior reasoning and each results. Never shared
         # between agent instances.
         self._observations: list[tuple[ToolCall, ToolResult]] = []
-        self._scripted_calls = deque(scripted_calls or ())
-        self._scripted_mode = scripted_calls is not None
 
-    # @retry(wait=wait_exponential(min=1, max=60), stop=stop_after_attempt(3))
-    async def next_tool_call(self, scratchpad: str = "") -> ToolCall:
+    def bind_tool_executor(
+        self,
+        executor: Callable[[str, dict[str, Any]], Awaitable[Any]],
+    ) -> None:
+        """Bind the engine's authoritative tool executor for this match."""
+        self._tool_executor = executor
 
+    async def _handle_deferred_tools(
+        self, ctx: RunContext, requests: DeferredToolRequests
+    ) -> DeferredToolResults | None:
+        """Native inline resolver: run each deferred call via the engine."""
+        if self._tool_executor is None:
+            return None
+        calls: dict[str, Any] = {}
+        for call in requests.calls:
+            try:
+                calls[call.tool_call_id] = await self._tool_executor(
+                    call.tool_name, call.args_as_dict()
+                )
+            except Exception as error:
+                logger.error(f"Deferred tool executor failed: {error}")
+                calls[call.tool_call_id] = {
+                    "success": False,
+                    "error": f"Tool execution failed: {error}",
+                }
+        return requests.build_results(calls=calls)
+
+    async def run_turn(self, scratchpad: str = "") -> str | None:
+        """Run one native agent turn, resolving tools inline via the handler.
+
+        Returns the model's final text output, or None when the turn
+        produced nothing usable (scripted mode, rate limits exhausted,
+        provider errors). Message history carries over across turns.
+        """
         if self._scripted_calls:
-            return self._validate(self._scripted_calls.popleft())
+            call = self._validate(self._scripted_calls.popleft())
+            if self._tool_executor is not None:
+                await self._tool_executor(call.name, dict(call.arguments))
+            return None
         if self._scripted_mode:
-            return ToolCall(name="pass")
-
-        retries = 3
+            return None
 
         prompt = "Choose exactly one next tool call."
-
         if self.objective:
             prompt += f"\nCurrent match objective: {self.objective}"
         prompt += f"\nYour scratchpad:\n<scratchpad>{scratchpad}</scratchpad>"
@@ -152,14 +285,12 @@ class ToolChoosingAgent:
             prompt += "\nRecent tool calls and results (JSON):\n" + "\n".join(
                 self._format_recent_observations()
             )
-        current_prompt = prompt
-        message_history = None
-        for _ in range(retries):
+        for _ in range(3):
             try:
                 result = await self._agent.run(
-                    current_prompt, message_history=message_history
+                    prompt, message_history=self._message_history
                 )
-                message_history = result.all_messages()
+                self._message_history = result.all_messages()
             except ModelHTTPError as e:
                 if e.status_code == 429:
                     logger.critical(f"Model rate limit exceeded: {e}")
@@ -172,65 +303,29 @@ class ToolChoosingAgent:
                     continue
                 else:
                     logger.error(f"Model HTTP error: {e}")
-                    return ToolCall(name="pass")
+                    return None
             except Exception as e:
                 logger.error(f"Unexpected error: {e}")
-                return ToolCall(name="pass")
-            try:
-                return self._validate(result.output)
-            except ValueError as e:
-                logger.error(f"Invalid tool call: {e}")
-                current_prompt = f"ERROR: {e}. Please choose a valid tool."
-                message_history = result.all_messages()
-            continue
+                return None
+            if isinstance(result.output, str):
+                return result.output
+            logger.error(
+                f"Unexpected agent output type: {type(result.output).__name__}"
+            )
+            return None
         logger.critical("Max retries exceeded for tool call generation.")
-        return ToolCall(name="pass")
+        return None
 
     async def observe_result(self, call: ToolCall, result: ToolResult) -> None:
-        # Store copies: later hiding redacts stored outputs in place and must
-        # never mutate the result the engine recorded.
+        # Store copies so later callers can never mutate the recorded result.
         self._observations.append(
             (call.model_copy(deep=True), result.model_copy(deep=True))
         )
-        self._hide_older_observations()
-
-    def _hide_older_observations(self) -> None:
-        """Hide the ``output`` field of older over-budget results in place.
-
-        Called right after a new pair is observed, so the just-observed
-        output stays full for one turn. Only the oversized ``output`` field
-        is replaced; ``success``, ``error``, ``exit_code``, ``notice`` (and
-        the paired reason) are kept as-is.
-        """
-        if len(self._observations) <= 1:
-            return
-        limit = lower_token_limit()
-        for i in range(len(self._observations) - 1):
-            _, stored = self._observations[i]
-            if count_tokens(stored.output or "") > limit:
-                self._observations[i] = (
-                    self._observations[i][0],
-                    stored.model_copy(
-                        update={"output": HIDDEN_OUTPUT_PLACEHOLDER}
-                    ),
-                )
 
     def _format_recent_observations(self) -> list[str]:
-        """Render the last 5 (call, result) pairs as JSON: most recent full.
-
-        Defensive pass for the case where limits changed at runtime or
-        history predates hiding; normally ``_hide_older_observations`` has
-        already hidden older large outputs in place.
-        """
-        limit = lower_token_limit()
-        recent = self._observations[-5:]
+        """Render the last 5 (call, result) pairs as JSON, outputs intact."""
         formatted: list[str] = []
-        for j, (call, result) in enumerate(recent):
-            is_most_recent = j == len(recent) - 1
-            if not is_most_recent and count_tokens(result.output or "") > limit:
-                result = result.model_copy(
-                    update={"output": HIDDEN_OUTPUT_PLACEHOLDER}
-                )
+        for call, result in self._observations[-5:]:
             formatted.append(
                 json.dumps(
                     {

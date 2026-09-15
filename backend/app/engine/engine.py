@@ -2,21 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import shlex
+from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 import logfire
+from pydantic_ai import ToolReturn
 
 from app.agents.models import AgentType
-from app.agents.tokens import (
-    count_tokens,
-    lower_limit_notice,
-    lower_token_limit,
-    upper_limit_notice,
-    upper_limit_redaction,
-    upper_token_limit,
-)
+from app.agents.tokens import count_tokens, lower_limit_notice, lower_token_limit
 from app.agents.tools import ToolCall, ToolExecutionContext, ToolRegistry, ToolResult
 from app.agents.tools.registry import build_default_registry
 from app.logger import get_logger
@@ -41,7 +36,11 @@ logger = get_logger()
 
 @runtime_checkable
 class AgentActionSource(Protocol):
-    async def next_tool_call(self, scratchpad: str = "") -> ToolCall: ...
+    def bind_tool_executor(
+        self, executor: Callable[[str, dict[str, Any]], Awaitable[Any]]
+    ) -> None: ...
+
+    async def run_turn(self, scratchpad: str = "") -> str | None: ...
 
 
 class EngineExecutionContext(ToolExecutionContext):
@@ -267,7 +266,7 @@ class Engine:
                     **output_telemetry(result.output),
                 },
             )
-            result = self._apply_output_limits(actor, result)
+            result = self._attach_long_output_notice(actor, result)
             self._agent_state(actor).last_result = result
             self._record(
                 "tool_result", actor=actor.value, tool=call.name, success=result.success
@@ -304,7 +303,7 @@ class Engine:
     async def run_agents(
         self,
         prisoner: AgentActionSource,
-        warden: AgentActionSource,  # this means class / object type does not matter as long as it implements next_tool_call() method
+        warden: AgentActionSource,  # this means class / object type does not matter as long as it implements run_turn() + bind_tool_executor()
         *,
         timeout_seconds: float | None = None,
     ) -> None:
@@ -374,23 +373,77 @@ class Engine:
         )
 
     async def _agent_loop(self, actor: AgentType, source: AgentActionSource) -> None:
+        """Drive one actor via native deferred tool calling.
+
+        Binds the engine's authoritative executor once, then each iteration
+        is a single native ``agent.run()`` (via ``source.run_turn``) that
+        resolves tool calls inline through the executor.
+        """
+        binder = getattr(source, "bind_tool_executor", None)
+        if binder is not None:
+            binder(
+                lambda tool_name, args: self._execute_deferred_tool(
+                    actor, source, tool_name, args
+                )
+            )
         while not self._stop_event.is_set():
             if not self.cooldowns.can_act(self.state, actor):
                 await asyncio.sleep(0.05)
                 continue
             scratchpad = await self._read_scratchpad(actor)
-            call = await source.next_tool_call(scratchpad)
-            logger.info(
-                f"ToolCall Request[{actor}]: name={call.name} args={call.arguments}"
-            )
-            logger.info(f"[{actor}] - Executing Tool Call")
+            try:
+                output = await source.run_turn(scratchpad)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(f"[{actor}] agent turn failed")
+                await asyncio.sleep(1.0)
+                continue
+            if output is None:
+                await asyncio.sleep(1.0)
+
+    async def _execute_deferred_tool(
+        self,
+        actor: AgentType,
+        source: AgentActionSource,
+        tool_name: str,
+        args: dict[str, Any] | None,
+    ) -> Any:
+        """Native deferred-tool executor: pace, execute, observe, map.
+
+        Waits for the actor's cooldown (preserving one-action-per-window
+        pacing inside native runs), executes through the authoritative
+        ``execute_tool_call`` path, records the pair for the JSON history,
+        and maps the engine result to a Pydantic AI tool return value.
+        """
+        while (
+            not self._stop_event.is_set()
+            and self.state.status is MatchStatus.RUNNING
+            and not self.cooldowns.can_act(self.state, actor)
+        ):
+            await asyncio.sleep(0.05)
+        call = ToolCall(name=tool_name, arguments=dict(args or {}))
+        logger.info(
+            f"ToolCall Request[{actor}]: name={call.name} args={call.arguments}"
+        )
+        logger.info(f"[{actor}] - Executing Tool Call")
+        try:
             result = await self.execute_tool_call(actor, call)
-            observe = getattr(source, "observe_result", None)
-            if observe is not None:
-                logger.info(
-                    f"ToolResult[{actor}]: success={result.success}, output={result.output}, error={result.error}, metadata={result.metadata}"
-                )
+        except Exception as error:
+            logger.exception(f"[{actor}] tool execution raised")
+            result = ToolResult(success=False, error=f"Tool execution failed: {error}")
+        observe = getattr(source, "observe_result", None)
+        if observe is not None:
+            try:
                 await observe(call, result)
+            except Exception:
+                logger.exception(f"[{actor}] observe_result failed")
+        logger.info(
+            f"ToolResult[{actor}]: success={result.success}, output={result.output}, error={result.error}, metadata={result.metadata}"
+        )
+        return ToolReturn(
+            return_value=result.model_dump(exclude_none=True, exclude={"metadata"})
+        )
 
     def _setup_commands(self) -> list[str]:
         challenge = self.state.challenge
@@ -409,34 +462,18 @@ class Engine:
         return commands
 
     @staticmethod
-    def _apply_output_limits(actor: AgentType, result: ToolResult) -> ToolResult:
-        """Enforce the two-tier output policy on a fresh tool result.
+    def _attach_long_output_notice(actor: AgentType, result: ToolResult) -> ToolResult:
+        """Attach a scratchpad/narrowing suggestion when output is long.
 
-        - Above ``UPPER_TOKEN_LIMIT``: ``output`` is redacted immediately
-          (never sent, not even once); guidance goes in ``notice``.
-        - Above ``LOWER_TOKEN_LIMIT``: ``output`` is kept for exactly one
-          turn and a hide-next-turn ``notice`` is attached; the agent hides
-          the field afterwards.
-        - Otherwise: untouched.
+        Outputs are never hidden or redacted; long ones just carry guidance
+        in ``notice``.
         """
         token_count = count_tokens(result.output or "")
-        upper = upper_token_limit()
-        if token_count > upper:
-            logger.info(
-                f"[{actor}] tool output ({token_count} tokens > upper limit "
-                f"{upper}): redacted immediately."
-            )
-            return result.model_copy(
-                update={
-                    "output": upper_limit_redaction(token_count, upper),
-                    "notice": upper_limit_notice(token_count, upper),
-                }
-            )
         lower = lower_token_limit()
         if token_count > lower:
             logger.info(
-                f"[{actor}] tool output ({token_count} tokens > lower limit "
-                f"{lower}): kept for one turn with notice."
+                f"[{actor}] tool output ({token_count} tokens > long-output "
+                f"limit {lower}): attaching scratchpad suggestion."
             )
             return result.model_copy(
                 update={"notice": lower_limit_notice(token_count, lower)}

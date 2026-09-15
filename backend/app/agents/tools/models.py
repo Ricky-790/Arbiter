@@ -46,7 +46,7 @@ class ToolResult(BaseModel):
     notice: str | None = Field(
         default=None,
         description=(
-            "Optional guidance attached when the output exceeded token "
-            "limits (e.g. it will be hidden next turn)."
+            "Optional guidance attached when the output is long (e.g. a "
+            "suggestion to use the scratchpad and narrower commands)."
         ),
     )
