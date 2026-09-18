@@ -5,13 +5,16 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "alembic>=1.20.0",
     "fastapi[standard]>=0.141.1",
     "logfire[system-metrics]>=4.41.0",
     "pydantic>=2.13.5",
     "pydantic-ai>=2.37.0",
     "pydantic-ai-slim[groq]>=2.37.0",
+    "psycopg[binary]>=3.1",
     "rich>=15.0.0",
     "solari-sandbox>=0.2.0",
+    "sqlalchemy>=2.0",
     "tiktoken>=0.7.0",
 ]
 

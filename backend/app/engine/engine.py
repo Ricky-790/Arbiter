@@ -15,6 +15,8 @@ from app.agents.tools import ToolCall, ToolExecutionContext, ToolRegistry, ToolR
 from app.agents.tools.registry import build_default_registry
 from app.logger import get_logger
 from app.observability import (
+    agent_observability_context,
+    match_span,
     output_telemetry,
     record_match_event,
     set_span_attributes,
@@ -165,124 +167,117 @@ class Engine:
         self.state.status = MatchStatus.RUNNING
         self.state.started_at = utc_now()
         self._record("match_started")
-        record_match_event(
-            "match_started",
-            match_id=self.state.match_id,
-            challenge=self.state.challenge.name,
-        )
         logger.info("Match is running")
 
     async def execute_tool_call(self, actor: AgentType, call: ToolCall) -> ToolResult:
-        """Validate, charge, cool down, and delegate one agent-requested action."""
+        """Validate, charge, cool down, and delegate one agent-requested action.
+
+        The tool span opens as soon as the request is received, so every
+        outcome -- executed, rejected, or failed -- lands on that one span.
+        """
         async with (
             self._action_lock  # Makes sure only one async task can access a shared resource
         ):
-            if self.state.status is not MatchStatus.RUNNING:
-                logger.warning("Match not running")
-                record_match_event(
-                    "tool_rejected",
-                    match_id=self.state.match_id,
-                    actor=actor.value,
-                    tool=call.name,
-                    failure_category="match_not_running",
-                    success=False,
-                )
-                return ToolResult(success=False, error="Match is not running")
-            try:
-                tool = self.registry.get(call.name)
-            except KeyError:
-                logger.fatal(
-                    f"LLM called non-existent tool. tool: {call.name}, args: {call.arguments}"
-                )
-                record_match_event(
-                    "tool_rejected",
-                    match_id=self.state.match_id,
-                    actor=actor.value,
-                    tool=call.name,
-                    failure_category="tool_not_found",
-                    success=False,
-                )
-                return ToolResult(success=False, error=f"Unknown tool: {call.name}")
-            if not tool.is_available_to(actor):
-                logger.fatal(f"Tool call fail: {actor.value} cannot use {call.name}")
-                record_match_event(
-                    "tool_rejected",
-                    match_id=self.state.match_id,
-                    actor=actor.value,
-                    tool=call.name,
-                    failure_category="tool_not_allowed",
-                    success=False,
-                )
-                return ToolResult(
-                    success=False, error=f"{actor.value} cannot use {call.name}"
-                )
-            if not self.cooldowns.can_act(self.state, actor):
-                logger.warning(f"{actor} tool call: On Cooldown ")
-                record_match_event(
-                    "tool_rejected",
-                    match_id=self.state.match_id,
-                    actor=actor.value,
-                    tool=call.name,
-                    failure_category="cooldown",
-                    success=False,
-                )
-                return ToolResult(success=False, error="Tool cooldown is active")
-            if not self.credits.can_afford(self.state, actor, tool.cost):
-                logger.warning(f"{actor} tool call: Low Credits")
-                record_match_event(
-                    "tool_rejected",
-                    match_id=self.state.match_id,
-                    actor=actor.value,
-                    tool=call.name,
-                    failure_category="insufficient_credits",
-                    success=False,
-                )
-                return ToolResult(success=False, error="Insufficient credits")
-            if actor is AgentType.WARDEN:
-                trap_error = self.traps.validate_arm(self.state, call)
-                if trap_error:
-                    logger.warning(f"Trap set failed: {trap_error}")
-                    record_match_event(
-                        "tool_rejected",
-                        match_id=self.state.match_id,
-                        actor=actor.value,
-                        tool=call.name,
-                        failure_category="trap_blocked",
-                        success=False,
-                    )
-                    return ToolResult(success=False, error=trap_error)
-
-            # Free tools (file/scratchpad access) skip budgeting entirely:
-            # no credit deduction, no action cooldown.
-            if call.name not in FREE_TOOL_NAMES:
-                self.credits.deduct(self.state, actor, tool.cost)
-                self.cooldowns.start(self.state, actor)
-            context = EngineExecutionContext(self, actor)
             with tool_execution_span(
-                match_id=self.state.match_id, actor=actor.value, tool=call.name
+                match_id=self.state.match_id,
+                agent_role=actor.value,
+                tool_name=call.name,
+                tool_args=call.arguments,
             ) as span:
-                result = await tool.execute(context, **call.arguments)
+                return await self._execute_tool_call_tracked(actor, call, span)
+
+    async def _execute_tool_call_tracked(
+        self, actor: AgentType, call: ToolCall, span: Any | None
+    ) -> ToolResult:
+        """Validation/execution body for one tool request; span already open."""
+
+        def reject(failure_category: str, error: str) -> ToolResult:
             set_span_attributes(
                 span,
                 {
-                    "stage": "executed",
-                    "success": result.success,
-                    "exit_code": result.exit_code,
-                    "credits_charged": tool.cost.value,
-                    **output_telemetry(result.output),
+                    "arbiter.status": "rejected",
+                    "arbiter.success": False,
+                    "arbiter.failure_category": failure_category,
+                    "arbiter.credits_charged": 0,
+                    **output_telemetry(None),
                 },
             )
-            self._agent_state(actor).last_result = result
-            self._record(
-                "tool_result", actor=actor.value, tool=call.name, success=result.success
+            record_match_event(
+                "tool_rejected",
+                match_id=self.state.match_id,
+                actor=actor.value,
+                tool=call.name,
+                failure_category=failure_category,
+                success=False,
             )
+            return ToolResult(success=False, error=error)
 
-            if actor is AgentType.WARDEN and result.success:
-                if call.name in TRAP_TOOL_NAMES:
-                    self.traps.arm(self.state, call)
-                elif self.state.blocked_trap_name is not None:
-                    self.state.blocked_trap_name = None
-            return result
+        if self.state.status is not MatchStatus.RUNNING:
+            logger.warning("Match not running")
+            return reject("match_not_running", "Match is not running")
+        try:
+            tool = self.registry.get(call.name)
+        except KeyError:
+            logger.fatal(
+                f"LLM called non-existent tool. tool: {call.name}, args: {call.arguments}"
+            )
+            return reject("tool_not_found", f"Unknown tool: {call.name}")
+        if not tool.is_available_to(actor):
+            logger.fatal(f"Tool call fail: {actor.value} cannot use {call.name}")
+            return reject("tool_not_allowed", f"{actor.value} cannot use {call.name}")
+        if not self.cooldowns.can_act(self.state, actor):
+            logger.warning(f"{actor} tool call: On Cooldown ")
+            return reject("cooldown", "Tool cooldown is active")
+        if not self.credits.can_afford(self.state, actor, tool.cost):
+            logger.warning(f"{actor} tool call: Low Credits")
+            return reject("insufficient_credits", "Insufficient credits")
+        if actor is AgentType.WARDEN:
+            trap_error = self.traps.validate_arm(self.state, call)
+            if trap_error:
+                logger.warning(f"Trap set failed: {trap_error}")
+                return reject("trap_blocked", trap_error)
+
+        # Free tools (file/scratchpad access) skip budgeting entirely:
+        # no credit deduction, no action cooldown.
+        if call.name not in FREE_TOOL_NAMES:
+            self.credits.deduct(self.state, actor, tool.cost)
+            self.cooldowns.start(self.state, actor)
+        context = EngineExecutionContext(self, actor)
+        try:
+            result = await tool.execute(context, **call.arguments)
+        except Exception:
+            set_span_attributes(
+                span,
+                {
+                    "arbiter.status": "failed",
+                    "arbiter.success": False,
+                    "arbiter.failure_category": "execution_error",
+                    "arbiter.credits_charged": tool.cost.value,
+                    **output_telemetry(None),
+                },
+            )
+            raise
+        set_span_attributes(
+            span,
+            {
+                "arbiter.status": "executed",
+                "arbiter.success": result.success,
+                "arbiter.exit_code": result.exit_code,
+                "arbiter.credits_charged": tool.cost.value,
+                **output_telemetry(result.output),
+            },
+        )
+        self._agent_state(actor).last_result = result
+        self._record(
+            "tool_result", actor=actor.value, tool=call.name, success=result.success
+        )
+
+        if actor is AgentType.WARDEN and result.success:
+            if call.name in TRAP_TOOL_NAMES:
+                self.traps.arm(self.state, call)
+            elif self.state.blocked_trap_name is not None:
+                self.state.blocked_trap_name = None
+        return result
 
     async def handle_sandbox_event(self, event: SandboxEvent) -> bool:
         """Open the Warden reaction window if the active trap matches an event."""
@@ -315,45 +310,64 @@ class Engine:
         workers: list[asyncio.Task[None]] = []
         stop_waiter: asyncio.Task[bool] | None = None
         timeout_waiter: asyncio.Task[None] | None = None
-        try:
-            await self.start()
-            workers = [
-                asyncio.create_task(self._agent_loop(AgentType.PRISONER, prisoner)),
-                asyncio.create_task(self._agent_loop(AgentType.WARDEN, warden)),
-            ]
-            stop_waiter = asyncio.create_task(self._stop_event.wait())
-            timeout_waiter = (
-                asyncio.create_task(asyncio.sleep(timeout_seconds))
-                if timeout_seconds is not None
-                else None
+        # The match span stays open across setup, both agent tasks, all LLM
+        # and tool calls, finishing, and cleanup. Tasks created inside
+        # inherit its context, so the whole match lands in one trace.
+        with match_span(
+            match_id=self.state.match_id,
+            challenge_id=self.state.challenge.name,
+        ) as match_sp:
+            try:
+                await self.start()
+                workers = [
+                    asyncio.create_task(self._agent_loop(AgentType.PRISONER, prisoner)),
+                    asyncio.create_task(self._agent_loop(AgentType.WARDEN, warden)),
+                ]
+                stop_waiter = asyncio.create_task(self._stop_event.wait())
+                timeout_waiter = (
+                    asyncio.create_task(asyncio.sleep(timeout_seconds))
+                    if timeout_seconds is not None
+                    else None
+                )
+                wait_for = [*workers, stop_waiter]
+                if timeout_waiter is not None:
+                    wait_for.append(timeout_waiter)
+                done, _ = await asyncio.wait(
+                    wait_for, return_when=asyncio.FIRST_COMPLETED
+                )
+                if timeout_waiter in done:
+                    self.finish(winner=AgentType.WARDEN, end_reason="match timeout")
+                elif stop_waiter not in done:
+                    # A worker ended unexpectedly; raise exception and finish
+                    # the match instead of silently leaving its opponent running.
+                    for worker in done:
+                        worker.result()
+                    self.finish(end_reason="agent action loop ended")
+            finally:
+                for task in [*workers, stop_waiter, timeout_waiter]:
+                    if task is None:
+                        continue
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(
+                    *workers,
+                    *([stop_waiter] if stop_waiter is not None else []),
+                    *([timeout_waiter] if timeout_waiter is not None else []),
+                    return_exceptions=True,
+                )
+                if self.state.status is MatchStatus.RUNNING:
+                    self.finish()
+                await self.sandbox_manager.destroy_sandbox(self.state.match_id)
+            set_span_attributes(
+                match_sp,
+                {
+                    "arbiter.status": "finished",
+                    "arbiter.winner": self.state.winner.value
+                    if self.state.winner
+                    else None,
+                    "arbiter.end_reason": self.state.end_reason,
+                },
             )
-            wait_for = [*workers, stop_waiter]
-            if timeout_waiter is not None:
-                wait_for.append(timeout_waiter)
-            done, _ = await asyncio.wait(wait_for, return_when=asyncio.FIRST_COMPLETED)
-            if timeout_waiter in done:
-                self.finish(winner=AgentType.WARDEN, end_reason="match timeout")
-            elif stop_waiter not in done:
-                # A worker ended unexpectedly; raise exception and finish
-                # the match instead of silently leaving its opponent running.
-                for worker in done:
-                    worker.result()
-                self.finish(end_reason="agent action loop ended")
-        finally:
-            for task in [*workers, stop_waiter, timeout_waiter]:
-                if task is None:
-                    continue
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(
-                *workers,
-                *([stop_waiter] if stop_waiter is not None else []),
-                *([timeout_waiter] if timeout_waiter is not None else []),
-                return_exceptions=True,
-            )
-            if self.state.status is MatchStatus.RUNNING:
-                self.finish()
-            await self.sandbox_manager.destroy_sandbox(self.state.match_id)
 
     def finish(
         self, *, winner: AgentType | None = None, end_reason: str | None = None
@@ -367,12 +381,6 @@ class Engine:
         self._stop_event.set()
         self._record(
             "match_finished",
-            winner=winner.value if winner else None,
-            end_reason=end_reason,
-        )
-        record_match_event(
-            "match_finished",
-            match_id=self.state.match_id,
             winner=winner.value if winner else None,
             end_reason=end_reason,
         )
@@ -397,7 +405,10 @@ class Engine:
                 continue
             scratchpad = await self._read_scratchpad(actor)
             try:
-                output = await source.run_turn(scratchpad)
+                # Agent identity for observability: covers the LLM call, the
+                # deferred tool calls inside it, and the next model request.
+                with agent_observability_context(agent_role=actor.value):
+                    output = await source.run_turn(scratchpad)
             except asyncio.CancelledError:
                 raise
             except AgentUnavailableError as unavailable:

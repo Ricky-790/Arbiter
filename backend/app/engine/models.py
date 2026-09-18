@@ -24,7 +24,7 @@ class MatchStatus(str, Enum):
 
 
 class AgentState(BaseModel):
-    credits: int = 50
+    credits: int = 100
     cooldown_until: datetime | None = None
     reaction_until: datetime | None = None
     last_result: ToolResult | None = None
