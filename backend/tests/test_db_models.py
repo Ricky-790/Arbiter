@@ -23,6 +23,11 @@ class DbModelTests(unittest.TestCase):
                 "name",
                 "description",
                 "win_condition",
+                "challenge_type",
+                "verification_config",
+                "flag",
+                "flag_structure",
+                "verifier_script",
                 "sandbox_config",
                 "files",
                 "env_vars",
@@ -32,7 +37,15 @@ class DbModelTests(unittest.TestCase):
             ],
         )
         self.assertFalse(cols["setup_script"].nullable is False)
-        for name in ("sandbox_config", "files", "env_vars"):
+        self.assertTrue(cols["verifier_script"].nullable)
+        for name in (
+            "verification_config",
+            "flag",
+            "flag_structure",
+            "sandbox_config",
+            "files",
+            "env_vars",
+        ):
             self.assertIsInstance(cols[name].type, postgresql.JSONB)
 
     def test_matches_columns_and_fks(self) -> None:

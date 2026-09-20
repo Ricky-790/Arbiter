@@ -58,7 +58,8 @@ class LiveEndToEndGameTests(unittest.IsolatedAsyncioTestCase):
             challenge=ChallengeSpec(
                 name="Protected secret",
                 description="The Prisoner seeks the flag stored in /root/secret.txt.",
-                flag="ARB{live_protected_secret}",
+                flag={"value": "ARB{live_protected_secret}"},
+                flag_structure={"value": "str"},
             ),
             sandbox_manager=manager,
         )

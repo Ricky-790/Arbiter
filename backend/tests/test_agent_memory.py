@@ -62,7 +62,7 @@ class LongOutputNoticeTests(unittest.IsolatedAsyncioTestCase):
     async def test_long_output_sent_full_with_scratchpad_suggestion(self) -> None:
         engine = Engine(
             match_id="m-long",
-            challenge=ChallengeSpec(name="t", description="t", flag="F"),
+            challenge=ChallengeSpec(name="t", description="t", flag={"value": "F"}),
             sandbox_manager=FakeSandboxManager(),  # type: ignore[arg-type]
         )
         await engine.start()

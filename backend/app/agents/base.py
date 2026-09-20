@@ -74,6 +74,10 @@ def _function_signature_to_json_schema(tool: Any) -> dict[str, Any]:
                         schema["type"] = types
                     if type(None) in get_args(annotation):
                         schema["nullable"] = True
+                elif origin is dict:
+                    # Free-form JSON object (e.g. a structured flag submission).
+                    schema["type"] = "object"
+                    schema["additionalProperties"] = True
                 else:
                     schema["type"] = "object"
         else:

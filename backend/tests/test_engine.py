@@ -57,7 +57,12 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         manager = FakeSandboxManager()
         engine = Engine(
             match_id="match-1",
-            challenge=ChallengeSpec(name="test", description="test", flag="ARB{flag}"),
+            challenge=ChallengeSpec(
+                name="test",
+                description="test",
+                flag={"value": "ARB{flag}"},
+                flag_structure={"value": "str"},
+            ),
             sandbox_manager=manager,
         )
         return engine, manager
@@ -126,7 +131,10 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
 
         result = await engine.execute_tool_call(
             AgentType.PRISONER,
-            ToolCall(name="submit_flag", arguments={"flag": "ARB{flag}"}),
+            ToolCall(
+                name="submit_flag",
+                arguments={"response": {"value": "ARB{flag}"}},
+            ),
         )
 
         self.assertTrue(result.success)

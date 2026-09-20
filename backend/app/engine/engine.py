@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import shlex
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
@@ -29,6 +30,7 @@ from .cooldowns import CooldownManager
 from .credits import CreditManager
 from .models import MatchState, MatchStatus, utc_now
 from .traps import TRAP_TOOL_NAMES, TrapManager
+from .verification import parse_verifier_verdict, validate_submission
 
 logger = get_logger()
 
@@ -107,14 +109,49 @@ class EngineExecutionContext(ToolExecutionContext):
             match_id=self.engine.state.match_id, ip=ip, port=port
         )
 
-    async def submit_flag(self, *, flag: str) -> ToolResult:
-        self.engine.state.submitted_flag = flag
-        if flag == self.engine.state.challenge.flag:
+    async def submit_flag(self, *, response: dict[str, Any]) -> ToolResult:
+        """Validate a structured submission, then judge it.
+
+        The submission's shape is checked against the challenge's
+        ``flag_structure`` first. A challenge with a ``verifier_script`` is
+        judged inside the sandbox; otherwise the submission is compared with
+        the stored ``flag``. The Engine alone decides the winner.
+        """
+        challenge = self.engine.state.challenge
+
+        structure_error = validate_submission(response, challenge.flag_structure)
+        if structure_error:
+            return ToolResult(
+                success=False,
+                error=(
+                    "Submission does not match the challenge flag structure: "
+                    f"{structure_error}"
+                ),
+            )
+
+        self.engine.state.submitted_flag = response
+
+        if challenge.verifier_script:
+            success, reason = await self.engine.run_verifier_script(response)
+            if success:
+                self.engine.finish(
+                    winner=AgentType.PRISONER,
+                    end_reason=f"verifier accepted the submission: {reason}",
+                )
+                return ToolResult(success=True, output=reason)
+            return ToolResult(
+                success=False, error=f"Verifier rejected the submission: {reason}"
+            )
+
+        if response == challenge.flag:
             self.engine.finish(
                 winner=AgentType.PRISONER, end_reason="correct flag submitted"
             )
             return ToolResult(success=True, output="Correct flag submitted.")
-        return ToolResult(success=True, output="Flag submitted for evaluation.")
+        return ToolResult(
+            success=False,
+            error="Incorrect flag. Review the flag structure and try again.",
+        )
 
     async def pass_turn(self) -> ToolResult:
         return ToolResult(success=True, output="Passed.")
@@ -131,6 +168,7 @@ class Engine:
         sandbox_manager: SandboxManager,
         registry: ToolRegistry | None = None,
         cooldown_seconds: float = 5.0,
+        event_sink: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.state = MatchState(match_id=match_id, challenge=challenge)
         self.sandbox_manager = sandbox_manager
@@ -138,6 +176,9 @@ class Engine:
         self.credits = CreditManager()
         self.cooldowns = CooldownManager(timedelta(seconds=cooldown_seconds))
         self.traps = TrapManager()
+        # Optional live event transport (e.g. Redis pub/sub for spectators).
+        # Called synchronously from `_record`; must never block or raise.
+        self.event_sink = event_sink
         self._action_lock = asyncio.Lock()
         self._stop_event = asyncio.Event()
         logger.info("Game engine instance initialized")
@@ -168,6 +209,35 @@ class Engine:
         self.state.started_at = utc_now()
         self._record("match_started")
         logger.info("Match is running")
+
+    async def run_verifier_script(
+        self, submission: dict[str, Any]
+    ) -> tuple[bool, str]:
+        """Run the challenge's in-sandbox verifier and interpret its verdict.
+
+        The submitted answer is exposed to the script both as the
+        ``ARBITER_SUBMITTED_FLAG`` environment variable (JSON) and on stdin.
+        The script is expected to print ``{"success": bool, "reason": str}``;
+        anything unparseable is a rejection (the Engine never guesses a win).
+        """
+        script = self.state.challenge.verifier_script
+        if not script:
+            return False, "no verifier script configured"
+
+        payload = json.dumps(submission)
+        quoted = shlex.quote(payload)
+        command = (
+            f"printf %s {quoted} | "
+            f"ARBITER_SUBMITTED_FLAG={quoted} sh -c {shlex.quote(script)}"
+        )
+        result = await self.sandbox_manager.run_command(
+            match_id=self.state.match_id, command=command, user="root"
+        )
+        return parse_verifier_verdict(
+            output=result.output,
+            exit_code=result.exit_code,
+            error=result.error,
+        )
 
     async def execute_tool_call(self, actor: AgentType, call: ToolCall) -> ToolResult:
         """Validate, charge, cool down, and delegate one agent-requested action.
@@ -425,6 +495,10 @@ class Engine:
                 logger.exception(f"[{actor}] agent turn failed")
                 await asyncio.sleep(1.0)
                 continue
+            if output:
+                self._record(
+                    "agent_message", actor=actor.value, content=output
+                )
             if output is None:
                 await asyncio.sleep(1.0)
 
@@ -471,7 +545,14 @@ class Engine:
             f"usermod -aG sudo {shlex.quote(challenge.warden_user)}",
             f"id -u {shlex.quote(challenge.prisoner_user)} >/dev/null 2>&1 || useradd -m -s /bin/bash {shlex.quote(challenge.prisoner_user)}",
         ]
-        files = {"/root/secret.txt": challenge.flag, **challenge.files}
+        # Read-secret style challenges carry the file secret in flag["value"];
+        # other challenge types (e.g. stop-process) have no file-backed secret
+        # to plant, and writing the whole flag would leak the expected answer.
+        files: dict[str, str] = {}
+        secret = challenge.flag.get("value")
+        if isinstance(secret, str):
+            files["/root/secret.txt"] = secret
+        files.update(challenge.files)
         for path, content in files.items():
             commands.append(
                 "install -d -m 700 "
@@ -515,6 +596,19 @@ class Engine:
         return self.state.prisoner if actor is AgentType.PRISONER else self.state.warden
 
     def _record(self, event_type: str, **details: object) -> None:
-        self.state.events.append(
-            {"type": event_type, "timestamp": utc_now(), **details}
-        )
+        event = {"type": event_type, "timestamp": utc_now(), **details}
+        self.state.events.append(event)
+        self._emit(event)
+
+    def _emit(self, event: dict[str, Any]) -> None:
+        """Hand one event to the optional live sink.
+
+        Best-effort by design: event delivery is a side channel for
+        spectators and must never affect match execution.
+        """
+        if self.event_sink is None:
+            return
+        try:
+            self.event_sink(dict(event))
+        except Exception:
+            logger.exception("Match event sink failed")

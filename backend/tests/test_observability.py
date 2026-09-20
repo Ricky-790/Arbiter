@@ -100,7 +100,9 @@ class ObservabilityTests(unittest.IsolatedAsyncioTestCase):
         return Engine(
             match_id=match_id,
             challenge=ChallengeSpec(
-                name="obs-challenge", description="d", flag="ARB{obs}"
+                name="obs-challenge",
+                description="d",
+                flag={"value": "ARB{obs}"},
             ),
             sandbox_manager=FakeSandboxManager(),  # type: ignore[arg-type]
             cooldown_seconds=cooldown_seconds,
