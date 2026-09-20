@@ -62,6 +62,7 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
                 description="test",
                 flag={"value": "ARB{flag}"},
                 flag_structure={"value": "str"},
+                files={"/root/secret.txt": "ARB{flag}"},
             ),
             sandbox_manager=manager,
         )
@@ -79,6 +80,31 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("useradd" in command and "warden" in command for command in commands))
         self.assertTrue(any("usermod -aG sudo warden" in command for command in commands))
         self.assertTrue(any("/root/secret.txt" in command and "ARB{flag}" in command for command in commands))
+
+    def test_setup_commands_own_files_and_run_setup_script(self) -> None:
+        engine = Engine(
+            match_id="setup-1",
+            challenge=ChallengeSpec(
+                name="t",
+                description="t",
+                flag={"value": "s"},
+                flag_structure={"value": "str"},
+                files={"/challenge/hidden/.secret": "s"},
+                setup_script="nohup /tmp/service.sh &",
+            ),
+            sandbox_manager=FakeSandboxManager(),  # type: ignore[arg-type]
+        )
+
+        commands = engine._setup_commands()
+
+        self.assertTrue(any("useradd" in c and "warden" in c for c in commands))
+        self.assertEqual(commands[-1], "nohup /tmp/service.sh &")
+
+        file_commands = [c for c in commands if "/challenge/hidden/.secret" in c]
+        self.assertEqual(len(file_commands), 1)
+        self.assertIn("mkdir -p /challenge/hidden", file_commands[0])
+        self.assertIn("chown prisoner /challenge/hidden/.secret", file_commands[0])
+        self.assertIn("chmod 600 /challenge/hidden/.secret", file_commands[0])
 
     async def test_tool_cost_and_cooldown_are_centrally_enforced(self) -> None:
         engine, manager = self.make_engine()

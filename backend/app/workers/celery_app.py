@@ -4,10 +4,6 @@ Run a worker with::
 
     celery -A app.workers.celery_app worker \
         --queues=arbiter.matches --concurrency=1 --loglevel=INFO
-
-V1 deliberately runs one match at a time (one worker, one sandbox); the queue
-and pub/sub design already carry ``match_id`` everywhere so scaling to
-multiple workers/sandboxes later is a deployment change, not a rewrite.
 """
 
 from __future__ import annotations

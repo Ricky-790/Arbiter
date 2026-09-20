@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
+from app.agents.agents_directory import agent_mapper
 from app.api.schemas.dto_models import StartMatchRequest, StartMatchResponse
 from app.broker.events import subscribe_match_events
 from app.broker.models import MatchStartMessage
@@ -32,8 +33,9 @@ SSE_HEADERS = {
 
 
 @router.get("/free-models")
-async def list_free_models() -> dict:
-    raise HTTPException(status_code=501, detail="Not implemented")
+async def list_free_models() -> list[str]:
+    """Return the model names (``provider/model``) this deployment can host."""
+    return list(agent_mapper)
 
 
 @router.post(

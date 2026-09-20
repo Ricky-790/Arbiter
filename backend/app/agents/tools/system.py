@@ -14,9 +14,9 @@ class SubmitFlagTool(BaseTool):
         super().__init__(
             name="submit_flag",
             description=(
-                "Submit your answer for engine-side verification. Provide a "
-                "JSON object whose fields match the challenge's flag "
-                "structure, e.g. {\"value\": \"secret123\"}."
+                "Submit your result for engine-side verification. Provide a "
+                "JSON object whose fields match the structure stated in your "
+                "objective."
             ),
             allowed_agents=frozenset({AgentType.PRISONER}),
             cost=ToolCost.SUBMIT_FLAG,

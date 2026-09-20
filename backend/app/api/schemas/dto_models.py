@@ -32,6 +32,11 @@ class ChallengeSchema(BaseModel):
     name: str
     description: str
     win_condition: str
+    challenge_type: str
+    verification_config: dict[str, Any]
+    flag: dict[str, Any]
+    flag_structure: dict[str, Any]
+    verifier_script: str | None
     sandbox_config: dict[str, Any]
     files: dict[str, Any]
     env_vars: dict[str, Any]

@@ -124,7 +124,7 @@ class EngineExecutionContext(ToolExecutionContext):
             return ToolResult(
                 success=False,
                 error=(
-                    "Submission does not match the challenge flag structure: "
+                    "Submission does not match the expected structure: "
                     f"{structure_error}"
                 ),
             )
@@ -145,12 +145,15 @@ class EngineExecutionContext(ToolExecutionContext):
 
         if response == challenge.flag:
             self.engine.finish(
-                winner=AgentType.PRISONER, end_reason="correct flag submitted"
+                winner=AgentType.PRISONER, end_reason="correct submission"
             )
-            return ToolResult(success=True, output="Correct flag submitted.")
+            return ToolResult(success=True, output="Correct submission accepted.")
         return ToolResult(
             success=False,
-            error="Incorrect flag. Review the flag structure and try again.",
+            error=(
+                "Incorrect submission. Review the expected structure and try "
+                "again."
+            ),
         )
 
     async def pass_turn(self) -> ToolResult:
@@ -540,25 +543,34 @@ class Engine:
 
     def _setup_commands(self) -> list[str]:
         challenge = self.state.challenge
+        warden = shlex.quote(challenge.warden_user)
+        prisoner = shlex.quote(challenge.prisoner_user)
         commands = [
-            f"id -u {shlex.quote(challenge.warden_user)} >/dev/null 2>&1 || useradd -m -s /bin/bash {shlex.quote(challenge.warden_user)}",
-            f"usermod -aG sudo {shlex.quote(challenge.warden_user)}",
-            f"id -u {shlex.quote(challenge.prisoner_user)} >/dev/null 2>&1 || useradd -m -s /bin/bash {shlex.quote(challenge.prisoner_user)}",
+            f"id -u {warden} >/dev/null 2>&1 || useradd -m -s /bin/bash {warden}",
+            f"usermod -aG sudo {warden}",
+            f"id -u {prisoner} >/dev/null 2>&1 || useradd -m -s /bin/bash {prisoner}",
         ]
-        # Read-secret style challenges carry the file secret in flag["value"];
-        # other challenge types (e.g. stop-process) have no file-backed secret
-        # to plant, and writing the whole flag would leak the expected answer.
-        files: dict[str, str] = {}
-        secret = challenge.flag.get("value")
-        if isinstance(secret, str):
-            files["/root/secret.txt"] = secret
-        files.update(challenge.files)
-        for path, content in files.items():
+
+        # Challenge files are the game board: the Prisoner must be able to
+        # read and modify them for the challenge to be playable, so each file
+        # is owned by the Prisoner account with 600. Warden privilege is
+        # sandbox-local (sudo), so it can still inspect or restore them.
+        # `mkdir -p` leaves existing system directories such as /tmp untouched.
+        for path, content in challenge.files.items():
+            parent = shlex.quote(str(Path(path).parent))
+            target = shlex.quote(path)
             commands.append(
-                "install -d -m 700 "
-                f"{shlex.quote(str(Path(path).parent))} && "
-                f"printf %s {shlex.quote(content)} > {shlex.quote(path)} && chmod 600 {shlex.quote(path)}"
+                f"mkdir -p {parent} && "
+                f"printf %s {shlex.quote(content)} > {target} && "
+                f"chown {prisoner} {target} && chmod 600 {target}"
             )
+
+        # Everything beyond users/files -- installing packages, starting a
+        # background service, etc. -- is authored as a script and runs as root
+        # once the users and files above exist.
+        if challenge.setup_script:
+            commands.append(challenge.setup_script)
+
         return commands
 
     def _sandbox_user(self, actor: AgentType) -> str:

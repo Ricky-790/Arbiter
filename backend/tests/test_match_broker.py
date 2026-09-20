@@ -89,6 +89,7 @@ class ChallengeSpecMappingTests(unittest.TestCase):
             flag={"success": True, "process_id": "42"},
             flag_structure={"success": "bool", "process_id": "str"},
             verifier_script="pgrep -f target >/dev/null && echo '{\"success\": false}'",
+            setup_script="nohup /tmp/service.sh &",
             sandbox_config={},
             files={},
             env_vars={},
@@ -98,6 +99,7 @@ class ChallengeSpecMappingTests(unittest.TestCase):
 
         self.assertEqual(spec.flag_structure, {"success": "bool", "process_id": "str"})
         self.assertIn("pgrep", spec.verifier_script or "")
+        self.assertEqual(spec.setup_script, "nohup /tmp/service.sh &")
 
     def test_default_timeout_is_positive(self) -> None:
         self.assertGreater(default_timeout_seconds(), 0)

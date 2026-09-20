@@ -8,6 +8,16 @@ uv sync
 uv run alembic upgrade head
 ```
 
+## Seed challenges
+
+Loads the three starter scenarios (The Secret File, Unlock the Configuration,
+Stop the Target Process). It is idempotent — fixed ids, so re-running updates
+the rows in place:
+
+```bash
+uv run python -m app.db.scripts.seed_challenges
+```
+
 ## Run
 
 Redis is both the Celery broker and the live match-event bus:
@@ -37,7 +47,7 @@ immediately; the worker hosts it asynchronously.
 ```bash
 curl -X POST http://localhost:8000/api/v1/matches/start-match \
   -H 'Content-Type: application/json' \
-  -d '{"challenge_id": "<uuid>", "prisoner_model": "glm-5.3", "warden_model": "gemini-3.1-flash-lite"}'
+  -d '{"challenge_id": "<uuid>", "prisoner_model": "nvidia/glm-5.3", "warden_model": "google/gemini-3.1-flash-lite"}'
 # -> {"match_id": "...", "status": "queued"}
 ```
 

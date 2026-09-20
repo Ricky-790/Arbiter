@@ -47,14 +47,14 @@ deepseek_v4_flash = OpenAIChatModel(
     settings=settings,
 )
 agent_mapper = {
-    "laguna-xs-2.1": laguna,
-    "gemini-3.6-flash": gemini_3_6,
-    "lfm-2.5-2.6b": liquid_ai_lfm,
-    "minimax-m3": minimax_m3,
-    "ling-3.0-flash": ling_3_flash,
-    "glm-5.3": glm_5_3,
-    "gemini-3.1-flash-lite": gemini_3_1,
-    "deepseek-v4-flash-0731": deepseek_v4_flash,
+    "nvidia/laguna-xs-2.1": laguna,
+    "google/gemini-3.6-flash": gemini_3_6,
+    "openrouter/lfm-2.5-2.6b": liquid_ai_lfm,
+    "nvidia/minimax-m3": minimax_m3,
+    "openrouter/ling-3.0-flash": ling_3_flash,
+    "nvidia/glm-5.3": glm_5_3,
+    "google/gemini-3.1-flash-lite": gemini_3_1,
+    "nvidia/deepseek-v4-flash-0731": deepseek_v4_flash,
 }
 
 # agent = Agent(gemini_3_6, output_type=str)

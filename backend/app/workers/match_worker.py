@@ -15,6 +15,8 @@ import os
 from typing import Any
 from uuid import UUID
 
+from dotenv import load_dotenv
+
 from app.agents.prisoner import PrisonerAgent
 from app.agents.warden import WardenAgent
 from app.broker.events import MatchEventPublisher
@@ -23,13 +25,13 @@ from app.db import get_engine, get_session_factory, reset_session_state
 from app.db.models import Challenge
 from app.engine import Engine
 from app.logger import get_logger
-from app.sandbox.manager import SandboxManager
+from app.sandbox.manager import SandboxManager, sandbox_manager
 from app.sandbox.models import ChallengeSpec, SandboxConfig
 
 from .celery_app import START_MATCH_TASK, celery_app
 
 logger = get_logger()
-
+load_dotenv()
 DEFAULT_MATCH_TIMEOUT_SECONDS = 600.0
 
 
@@ -67,7 +69,7 @@ async def run_match(message: MatchStartMessage) -> dict[str, Any]:
             engine = Engine(
                 match_id=str(message.match_id),
                 challenge=spec,
-                sandbox_manager=SandboxManager(),
+                sandbox_manager=sandbox_manager,
                 event_sink=publish,
             )
             logger.info(f"Starting match {message.match_id}")
@@ -106,6 +108,7 @@ def build_challenge_spec(challenge: Challenge) -> ChallengeSpec:
         flag=dict(challenge.flag or {}),
         flag_structure=dict(challenge.flag_structure or {}),
         verifier_script=challenge.verifier_script,
+        setup_script=challenge.setup_script,
     )
 
 

@@ -97,6 +97,11 @@ class ChallengeSpec(BaseModel):
     # path -> content (text files only for now)
     files: dict[str, str] = Field(default_factory=dict)
 
+    # Optional shell commands for everything beyond users and files:
+    # installing packages, starting long-running processes, etc. Runs as root
+    # after the users and files above exist.
+    setup_script: str | None = None
+
     # Optional environment variables exported by default inside the sandbox.
     environment: dict[str, str] = Field(default_factory=dict)
 

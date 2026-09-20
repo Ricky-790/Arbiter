@@ -113,12 +113,12 @@ class ObservabilityTests(unittest.IsolatedAsyncioTestCase):
     async def test_match_creates_single_root_span_with_lifecycle(self) -> None:
         engine = self.make_engine()
         prisoner = PrisonerAgent(
-            model_name="laguna-xs-2.1",
+            model_name="nvidia/laguna-xs-2.1",
             objective="o",
             scripted_calls=[ToolCall(name="bash", arguments={"command": "id"})],
         )
         warden = WardenAgent(
-            model_name="laguna-xs-2.1", objective="o", scripted_calls=[]
+            model_name="nvidia/laguna-xs-2.1", objective="o", scripted_calls=[]
         )
         await engine.run_agents(prisoner, warden, timeout_seconds=0.3)
 
