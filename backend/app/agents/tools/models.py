@@ -20,6 +20,7 @@ class ToolCost(IntEnum):
     BLOCK_NETWORK = 8
     SUBMIT_FLAG = 0
     PASS = 0
+    PEEK_PRISONER_LOGS = 2
 
 
 class ToolCall(BaseModel):

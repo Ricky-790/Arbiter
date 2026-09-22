@@ -30,6 +30,7 @@ class WardenAgent(ToolChoosingAgent):
                 "kill_process",
                 "auto_kill",
                 "block_network",
+                "peek_prisoner_logs",
                 "pass",
             },
             objective=objective,

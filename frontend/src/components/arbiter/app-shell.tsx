@@ -1,7 +1,9 @@
 import { Link } from "@tanstack/react-router";
-import { Menu, X } from "lucide-react";
+import { Github, Menu, X } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
+
+const REPOSITORY_URL = "https://github.com/Ricky-790/Arbiter/tree/main";
 
 const navItems = [
   { to: "/", label: "HOME" },
@@ -16,22 +18,66 @@ export function AppShell({ children }: { children: ReactNode }) {
     <div className="min-h-screen bg-background text-foreground">
       <header className="sticky top-0 z-40 border-b border-border bg-background/95 backdrop-blur-sm">
         <div className="mx-auto flex h-16 max-w-[1600px] items-center gap-8 px-5 lg:px-8">
-          <Link to="/" className="font-display text-2xl font-bold tracking-normal">ARBITER</Link>
-          <nav className="hidden h-full items-center gap-7 md:flex" aria-label="Main navigation">
+          <Link
+            to="/"
+            className="font-display text-2xl font-bold tracking-normal"
+          >
+            ARBITER
+          </Link>
+          <nav
+            className="hidden h-full items-center gap-7 md:flex"
+            aria-label="Main navigation"
+          >
             {navItems.map((item) => (
-              <Link key={item.to} to={item.to} activeOptions={{ exact: item.to === "/" }} className="nav-link" activeProps={{ className: "nav-link nav-link-active" }}>
+              <Link
+                key={item.to}
+                to={item.to}
+                activeOptions={{ exact: item.to === "/" }}
+                className="nav-link"
+                activeProps={{ className: "nav-link nav-link-active" }}
+              >
                 {item.label}
               </Link>
             ))}
           </nav>
-          <Button variant="ghost" size="icon" className="ml-auto rounded-none md:hidden" onClick={() => setMenuOpen((open) => !open)} aria-label={menuOpen ? "Close menu" : "Open menu"}>
-            {menuOpen ? <X /> : <Menu />}
-          </Button>
+          <div className="ml-auto flex items-center gap-2">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="rounded-none md:hidden"
+              onClick={() => setMenuOpen((open) => !open)}
+              aria-label={menuOpen ? "Close menu" : "Open menu"}
+            >
+              {menuOpen ? <X /> : <Menu />}
+            </Button>
+            <a
+              href={REPOSITORY_URL}
+              target="_blank"
+              rel="noreferrer noopener"
+              aria-label="View the Arbiter repository on GitHub"
+              title="View the Arbiter repository on GitHub"
+              className="flex size-9 items-center justify-center text-muted-foreground transition-colors hover:text-primary"
+            >
+              <Github className="size-5 text-gray-300 hover:text-white " />
+            </a>
+          </div>
         </div>
         {menuOpen && (
-          <nav className="grid border-t border-border bg-panel px-5 py-3 md:hidden" aria-label="Mobile navigation">
+          <nav
+            className="grid border-t border-border bg-panel px-5 py-3 md:hidden"
+            aria-label="Mobile navigation"
+          >
             {navItems.map((item) => (
-              <Link key={item.to} to={item.to} onClick={() => setMenuOpen(false)} className="border-b border-border py-3 font-mono text-sm text-muted-foreground last:border-0" activeProps={{ className: "border-b border-border py-3 font-mono text-sm text-primary last:border-0" }}>
+              <Link
+                key={item.to}
+                to={item.to}
+                onClick={() => setMenuOpen(false)}
+                className="border-b border-border py-3 font-mono text-sm text-muted-foreground last:border-0"
+                activeProps={{
+                  className:
+                    "border-b border-border py-3 font-mono text-sm text-primary last:border-0",
+                }}
+              >
                 {item.label}
               </Link>
             ))}
@@ -44,13 +90,29 @@ export function AppShell({ children }: { children: ReactNode }) {
 }
 
 export function Eyebrow({ children }: { children: ReactNode }) {
-  return <p className="font-mono text-xs font-bold uppercase text-primary">// {children}</p>;
+  return (
+    <p className="font-mono text-xs font-bold uppercase text-primary">
+      // {children}
+    </p>
+  );
 }
 
 export function RoleBadge({ children }: { children: ReactNode }) {
-  return <span className="inline-flex border border-primary px-1.5 py-0.5 font-mono text-xs font-bold text-primary">{children}</span>;
+  return (
+    <span className="inline-flex border border-primary px-1.5 py-0.5 font-mono text-xs font-bold text-primary">
+      {children}
+    </span>
+  );
 }
 
 export function ResultBadge({ result }: { result: "WIN" | "LOSS" | "DRAW" }) {
-  return <span className={result === "DRAW" ? "status-badge status-muted" : "status-badge"}>{result}</span>;
+  return (
+    <span
+      className={
+        result === "DRAW" ? "status-badge status-muted" : "status-badge"
+      }
+    >
+      {result}
+    </span>
+  );
 }

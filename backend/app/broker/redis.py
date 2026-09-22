@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 
 from dotenv import load_dotenv
@@ -26,23 +27,31 @@ def match_events_channel(match_id: str) -> str:
 
 
 _async_client: Redis | None = None
+_async_client_loop: asyncio.AbstractEventLoop | None = None
 
 
 def get_async_redis() -> Redis:
-    """Process-wide async Redis client, created lazily on first use.
+    """Async Redis client for the event loop that is currently running.
 
-    Safe to call from the API process and from a worker's event loop. Each
-    process gets its own client; ``redis.asyncio`` manages the connection pool.
+    A worker serves every match in its own ``asyncio.run()`` loop, and a
+    client's connection pool is tied to the loop it first ran on. Reusing a
+    client cached from a previous, now-closed loop would silently fail
+    publishing, so the cache is keyed by the running loop and rebuilt when it
+    changes. The API process runs one long-lived loop and keeps a single
+    client, as before.
     """
-    global _async_client
-    if _async_client is None:
+    global _async_client, _async_client_loop
+    loop = asyncio.get_running_loop()
+    if _async_client is None or _async_client_loop is not loop:
         _async_client = Redis.from_url(redis_url(), decode_responses=True)
+        _async_client_loop = loop
     return _async_client
 
 
 async def close_async_redis() -> None:
     """Close the cached client (worker/task shutdown and tests)."""
-    global _async_client
+    global _async_client, _async_client_loop
     if _async_client is not None:
         await _async_client.aclose()
         _async_client = None
+    _async_client_loop = None

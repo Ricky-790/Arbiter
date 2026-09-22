@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import Awaitable, Callable
 
@@ -19,11 +20,23 @@ class SolariClient:
         self.api_key = os.getenv("SOLARI_API_KEY", "")
         self.base_url = os.getenv("SOLARI_BASE_URL", "https://api.getsolari.com")
         self._client: SandboxClient | None = None
+        self._client_loop: asyncio.AbstractEventLoop | None = None
 
     @property
     def client(self) -> SandboxClient:
-        if self._client is None:
+        """The SDK client for the loop that is currently running.
+
+        The SDK client owns an ``httpx.AsyncClient``, whose connection pool is
+        tied to the event loop it first ran on. A Celery worker serves every
+        match in its own ``asyncio.run()`` loop, so reusing a client built on
+        a previous, now-closed loop fails with ``Event loop is closed``.
+        Rebuild it whenever the running loop changes; within one loop the
+        client is cached and reused as before.
+        """
+        loop = asyncio.get_running_loop()
+        if self._client is None or self._client_loop is not loop:
             self._client = SandboxClient(api_key=self.api_key, base_url=self.base_url)
+            self._client_loop = loop
         return self._client
 
     async def create(self, config: SandboxConfig | None = None) -> Sandbox:

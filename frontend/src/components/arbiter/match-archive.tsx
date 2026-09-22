@@ -16,6 +16,13 @@ import {
 
 const PAGE_SIZE = 20;
 
+/**
+ * Match statuses that are still in flight. Clicking one of these opens the
+ * live spectator view instead of the recorded details, because its events are
+ * still arriving.
+ */
+const LIVE_STATUSES = new Set(["queued", "pending", "starting", "running"]);
+
 const COLUMNS = [
   "CHALLENGE",
   "PRISONER",
@@ -46,6 +53,20 @@ export function MatchArchive() {
   };
 
   const openMatch = (match: MatchListSchema) => {
+    // A match still in flight streams its events live; only a settled match
+    // has a recorded history to review.
+    if (LIVE_STATUSES.has(match.status)) {
+      navigate({
+        to: "/matches/$matchId",
+        params: { matchId: match.id },
+        search: {
+          prisoner: formatModel(match.prisoner_provider, match.prisoner_model),
+          warden: formatModel(match.warden_provider, match.warden_model),
+          challenge: match.challenge_name ?? "",
+        },
+      });
+      return;
+    }
     navigate({ to: "/matches", search: { id: match.id } });
   };
 

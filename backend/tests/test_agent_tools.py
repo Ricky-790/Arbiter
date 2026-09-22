@@ -1,7 +1,14 @@
 import unittest
 
 from app.agents.models import AgentType
-from app.agents.tools import BashTool, ToolResult, build_default_registry
+from app.agents.tools import (
+    PRISONER_LOG_PATH,
+    BashTool,
+    ToolCall,
+    ToolResult,
+    build_default_registry,
+)
+from app.engine.engine import PRISONER_LOG_LINE_LIMIT, format_tool_call
 
 
 class RecordingContext:
@@ -68,6 +75,7 @@ class ToolRegistryTests(unittest.TestCase):
                 "kill_process",
                 "auto_kill",
                 "block_network",
+                "peek_prisoner_logs",
                 "pass",
             },
         )
@@ -119,3 +127,57 @@ class ToolDelegationTests(unittest.IsolatedAsyncioTestCase):
                 ("pass_turn", {}),
             ],
         )
+
+    async def test_peek_prisoner_logs_tails_the_requested_number(self) -> None:
+        context = RecordingContext()
+
+        result = await build_default_registry().get("peek_prisoner_logs").execute(
+            context, count=5
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(len(context.calls), 1)
+        name, kwargs = context.calls[0]
+        self.assertEqual(name, "run_command")
+        self.assertIn("tail -n 5", kwargs["command"])
+        self.assertIn(PRISONER_LOG_PATH, kwargs["command"])
+
+    async def test_peek_prisoner_logs_rejects_non_positive_counts(self) -> None:
+        context = RecordingContext()
+
+        result = await build_default_registry().get("peek_prisoner_logs").execute(
+            context, count=0
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(context.calls, [])
+
+
+class ToolCallFormattingTests(unittest.TestCase):
+    def test_single_argument_call_renders_just_the_value(self) -> None:
+        call = ToolCall(name="bash", arguments={"command": "ls -la ."})
+
+        self.assertEqual(format_tool_call(call), "bash(ls -la .)")
+
+    def test_long_arguments_are_truncated(self) -> None:
+        call = ToolCall(
+            name="write_file",
+            arguments={"path": "/tmp/x", "content": "y" * 5000},
+        )
+
+        rendered = format_tool_call(call)
+
+        self.assertLessEqual(len(rendered), PRISONER_LOG_LINE_LIMIT)
+        self.assertTrue(rendered.startswith("write_file(path=/tmp/x, content="))
+        self.assertIn("…", rendered)
+
+    def test_whole_line_is_capped(self) -> None:
+        call = ToolCall(
+            name="bash",
+            arguments={f"arg{index}": "z" * 500 for index in range(5)},
+        )
+
+        rendered = format_tool_call(call)
+
+        self.assertEqual(len(rendered), PRISONER_LOG_LINE_LIMIT)
+        self.assertTrue(rendered.endswith("…"))

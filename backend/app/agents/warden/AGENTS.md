@@ -13,9 +13,14 @@ Its available capabilities may include:
 - process termination
 - automatic process-kill rules
 - network blocking
+- prisoner activity inspection (`peek_prisoner_logs`)
 - pass
 
 The exact allowed tools are configured explicitly by `warden.py`.
+
+The Prisoner activity log (`/tmp/prisoner_logs`) records only the Prisoner's
+tool calls, never their results, and never private calls such as flag
+submission or scratchpad use.
 
 ## Implementation
 
@@ -74,6 +79,7 @@ Its information comes from:
 
 - its own tool results
 - sandbox events exposed to it
+- the Prisoner activity log (tool calls only, never results or private calls)
 - intentionally public match information
 
 ## Security

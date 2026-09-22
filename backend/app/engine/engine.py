@@ -12,7 +12,13 @@ from pydantic_ai import ToolReturn
 
 from app.agents.base import AgentUnavailableError
 from app.agents.models import AgentType
-from app.agents.tools import ToolCall, ToolExecutionContext, ToolRegistry, ToolResult
+from app.agents.tools import (
+    PRISONER_LOG_PATH,
+    ToolCall,
+    ToolExecutionContext,
+    ToolRegistry,
+    ToolResult,
+)
 from app.agents.tools.registry import build_default_registry
 from app.db.match_log import store_match_activity
 from app.logger import get_logger
@@ -38,6 +44,48 @@ logger = get_logger()
 #: Tools exempt from credit deduction and action cooldown. File and
 #: scratchpad access is free by design; everything else is budgeted.
 FREE_TOOL_NAMES = frozenset({"read_file", "write_file", "write_to_scratchpad"})
+
+#: Prisoner tool calls that stay private to the Prisoner -- their own
+#: submission and their own memory -- so they are never mirrored into the
+#: Warden-visible activity log.
+PRIVATE_PRISONER_TOOLS = frozenset(
+    {"submit_flag", "write_to_scratchpad", "read_scratchpad"}
+)
+
+#: Longest rendered tool call written to the Prisoner log. Arguments can be
+#: large (a write_file body, for example), so a line is bounded.
+PRISONER_LOG_LINE_LIMIT = 300
+
+
+def format_tool_call(call: ToolCall, value_limit: int = 200) -> str:
+    """Render one tool call as a short single line, e.g. ``bash(ls -la .)``.
+
+    A single-argument call shows the value alone; multi-argument calls show
+    ``key=value`` pairs.
+    """
+    arguments = call.arguments
+    if len(arguments) == 1:
+        rendered = _shorten(next(iter(arguments.values())), value_limit)
+    else:
+        rendered = ", ".join(
+            f"{key}={_shorten(value, value_limit)}"
+            for key, value in arguments.items()
+        )
+    text = f"{call.name}({rendered})"
+    if len(text) > PRISONER_LOG_LINE_LIMIT:
+        text = text[: PRISONER_LOG_LINE_LIMIT - 1] + "…"
+    return text
+
+
+def _shorten(value: Any, limit: int) -> str:
+    if isinstance(value, str):
+        text = value
+    else:
+        try:
+            text = json.dumps(value, separators=(",", ":"), default=str)
+        except (TypeError, ValueError):
+            text = str(value)
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 @runtime_checkable
@@ -256,6 +304,11 @@ class Engine:
         Every outcome is also persisted: the requested tool plus its arguments
         go into ``action``, the outcome into ``result``.
         """
+        # Mirror the request into the Warden-visible log before it runs: the
+        # Warden learns what the Prisoner attempted, never whether it worked.
+        if actor is AgentType.PRISONER and call.name not in PRIVATE_PRISONER_TOOLS:
+            await self._log_prisoner_tool_call(call)
+
         action = {"tool": call.name, "arguments": call.arguments}
         try:
             async with (
@@ -684,6 +737,26 @@ class Engine:
     def _match_snapshot(self, **values: Any) -> dict[str, Any]:
         """Combine the hosted match metadata with the latest lifecycle values."""
         return {**(self.match_metadata or {}), **values}
+
+    async def _log_prisoner_tool_call(self, call: ToolCall) -> None:
+        """Append one Prisoner tool call to the Warden-visible sandbox log.
+
+        The entry records only the call (name plus arguments), never the
+        result, so the Warden can see what the Prisoner is doing without being
+        told whether it worked. The file is written as root and left
+        world-readable, so the Prisoner cannot tamper with their own record.
+
+        Best effort: a logging failure must never break the match.
+        """
+        line = f"Prisoner used {format_tool_call(call)}"
+        path = shlex.quote(PRISONER_LOG_PATH)
+        command = f"printf '%s\\n' {shlex.quote(line)} >> {path} && chmod 644 {path}"
+        try:
+            await self.sandbox_manager.run_command(
+                match_id=self.state.match_id, command=command, user="root"
+            )
+        except Exception:
+            logger.exception("Failed to append to the Prisoner activity log")
 
     async def _report_agent_event(
         self, actor: AgentType, event_type: str, attributes: dict[str, Any]

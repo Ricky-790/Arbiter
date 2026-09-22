@@ -265,9 +265,9 @@ class ToolChoosingAgent:
         if self.objective:
             prompt += f"\nCurrent match objective: {self.objective}"
         prompt += f"\nYour scratchpad:\n<scratchpad>{scratchpad}</scratchpad>"
-        max_retries = 3
+        max_attempts = 3
         last_status: int | None = None
-        for attempt in range(1, max_retries + 1):
+        for attempt in range(1, max_attempts + 1):
             try:
                 result = await self._agent.run(
                     prompt, message_history=self._message_history
@@ -275,55 +275,44 @@ class ToolChoosingAgent:
                 self._message_history = result.all_messages()
             except ModelHTTPError as e:
                 status = e.status_code
-                if status == 429:
-                    last_status = status
-                    logger.critical(f"Model rate limit exceeded: {e}")
-                    raw_wait = e.headers.get("retry-after", 30) if e.headers else 30
-                    try:
-                        sleep_time = float(raw_wait)
-                    except (ValueError, TypeError):
-                        sleep_time = 30.0
+                if status not in self._RETRYABLE_STATUSES:
+                    logger.error(f"Model HTTP error: {e}")
                     await self._report_event(
-                        "agent_retry",
-                        reason="rate_limit",
+                        "agent_error",
+                        reason="model_http_error",
                         status=status,
                         attempt=attempt,
-                        max_attempts=max_retries,
-                        wait_seconds=sleep_time,
+                        max_attempts=max_attempts,
+                        detail=str(e),
                     )
-                    await asyncio.sleep(sleep_time)
-                    continue
-                if status in (503, 504):
-                    last_status = status
-                    logger.critical(f"Model temporarily unavailable ({status}): {e}")
-                    await self._report_event(
-                        "agent_retry",
-                        reason="model_unavailable",
-                        status=status,
-                        attempt=attempt,
-                        max_attempts=max_retries,
-                        wait_seconds=30.0,
-                    )
-                    await asyncio.sleep(30.0)
-                    continue
-                logger.error(f"Model HTTP error: {e}")
+                    self._record_failure()
+                    return None
+
+                last_status = status
+                logger.critical(f"Model provider error ({status}): {e}")
+                if attempt == max_attempts:
+                    # Nothing is left to wait for. Sleeping on the final
+                    # failure only delays the Engine terminating the match.
+                    break
+
+                wait = self._retry_wait(e, status=status)
                 await self._report_event(
-                    "agent_error",
-                    reason="model_http_error",
+                    "agent_retry",
+                    reason="rate_limit" if status == 429 else "model_unavailable",
                     status=status,
                     attempt=attempt,
-                    max_attempts=max_retries,
-                    detail=str(e),
+                    max_attempts=max_attempts,
+                    wait_seconds=wait,
                 )
-                self._record_failure()
-                return None
+                await asyncio.sleep(wait)
+                continue
             except Exception as e:
                 logger.error(f"Unexpected error: {e}")
                 await self._report_event(
                     "agent_error",
                     reason="unexpected_error",
                     attempt=attempt,
-                    max_attempts=max_retries,
+                    max_attempts=max_attempts,
                     detail=str(e),
                 )
                 self._record_failure()
@@ -338,15 +327,42 @@ class ToolChoosingAgent:
                 "agent_error",
                 reason="unexpected_output_type",
                 attempt=attempt,
-                max_attempts=max_retries,
+                max_attempts=max_attempts,
                 detail=type(result.output).__name__,
             )
             self._record_failure()
             return None
         raise AgentUnavailableError(
-            f"Model unavailable after {max_retries} retries"
+            f"Model unavailable after {max_attempts} attempts"
             + (f" (last status {last_status})" if last_status is not None else "")
         )
+
+    #: Provider statuses worth another attempt within the same turn.
+    _RETRYABLE_STATUSES: frozenset[int] = frozenset({429, 503, 504})
+
+    #: Upper bound on a provider-requested wait. A large ``Retry-After`` must
+    #: not consume the match's remaining wall-clock budget.
+    _max_retry_wait_seconds: float = 60.0
+
+    #: Wait used when the provider gives no usable ``Retry-After``.
+    _default_retry_wait_seconds: float = 30.0
+
+    @classmethod
+    def _retry_wait(cls, error: ModelHTTPError, *, status: int) -> float:
+        """Seconds to wait before the next attempt, honouring ``Retry-After``.
+
+        The header is only read for rate limits and is clamped to
+        :attr:`_max_retry_wait_seconds`; a missing, non-numeric or HTTP-date
+        value falls back to :attr:`_default_retry_wait_seconds`.
+        """
+        if status != 429 or not error.headers:
+            return cls._default_retry_wait_seconds
+        raw = error.headers.get("retry-after")
+        try:
+            wait = float(raw) if raw is not None else cls._default_retry_wait_seconds
+        except (TypeError, ValueError):
+            return cls._default_retry_wait_seconds
+        return max(0.0, min(wait, cls._max_retry_wait_seconds))
 
     #: How many failed turns in a row before the agent is declared unavailable.
     _max_consecutive_failures: int = 3

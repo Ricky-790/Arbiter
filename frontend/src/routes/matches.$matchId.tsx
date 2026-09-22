@@ -350,12 +350,12 @@ function formatTime(timestamp: string | undefined): string {
 function statusLabel(status: StreamStatus): string {
   switch (status) {
     case "connecting":
-      return "[SPECTATOR_SHELL_CONNECTING]";
+      return "Connecting";
     case "live":
-      return "[SPECTATOR_SHELL_ACTIVE]";
+      return "Connected";
     case "closed":
-      return "[SPECTATOR_STREAM_CLOSED]";
+      return "Closed";
     case "error":
-      return "[SPECTATOR_STREAM_ERROR]";
+      return "Error";
   }
 }

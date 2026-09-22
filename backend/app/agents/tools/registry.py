@@ -31,6 +31,7 @@ class ToolRegistry:
 def build_default_registry() -> ToolRegistry:
     """Create the initial Arbiter capability set without duplicate instances."""
     from .filesystem import (
+        PeekPrisonerLogsTool,
         ReadFileTool,
         WatchFileTool,
         WriteFileTool,
@@ -52,6 +53,7 @@ def build_default_registry() -> ToolRegistry:
             KillProcessTool(),
             AutoKillTool(),
             BlockNetworkTool(),
+            PeekPrisonerLogsTool(),
             SubmitFlagTool(),
             PassTool(),
         ]

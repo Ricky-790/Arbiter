@@ -121,6 +121,14 @@ A provider failure must not bypass Engine cleanup or silently give the agent aut
 
 The opponent and match timeout continue according to Engine policy while an agent is retrying.
 
+Retries are bounded per turn (429/503/504). When the budget is exhausted the
+agent raises `AgentUnavailableError` immediately: never sleep on the final
+failure, because nothing can recover and the wait only delays the Engine
+stopping the match. `Retry-After` is honoured for rate limits but clamped
+(`_max_retry_wait_seconds`) so a large value cannot consume the match's
+wall-clock budget. Only attempts that actually retry are reported as
+`agent_retry`; the last one reaches the match log as `agent_unavailable`.
+
 ## Prisoner and Warden
 
 `prisoner/` and `warden/` should remain thin role-specific wrappers.

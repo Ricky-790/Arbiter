@@ -3,6 +3,8 @@
 from .base import BaseTool
 from .execution import ToolExecutionContext
 from .filesystem import (
+    PRISONER_LOG_PATH,
+    PeekPrisonerLogsTool,
     ReadFileTool,
     WatchFileTool,
     WriteFileTool,
@@ -23,6 +25,7 @@ __all__ = [
     "ToolCost",
     "ToolResult",
     "ToolCall",
+    "PRISONER_LOG_PATH",
     "BashTool",
     "ReadFileTool",
     "WriteFileTool",
@@ -32,6 +35,7 @@ __all__ = [
     "WatchProcessTool",
     "AutoKillTool",
     "BlockNetworkTool",
+    "PeekPrisonerLogsTool",
     "SubmitFlagTool",
     "PassTool",
 ]

@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import shlex
+import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path, PurePosixPath
 
@@ -15,6 +16,18 @@ from .models import ChallengeSpec, CommandResult, SandboxConfig
 from .monitor import EventHandler, SandboxMonitor
 
 logger = get_logger()
+
+#: How long a match waits for a free Solari slot before giving up. Solari runs
+#: one live sandbox at a time, so a match requested while another is running
+#: has to wait for that slot; the cap only exists so a match cannot hang
+#: forever if Solari never releases one.
+SANDBOX_WAIT_SECONDS = 1800.0
+
+#: Delay before the first re-attempt, doubling up to the max. Polling keeps a
+#: queued match ready to grab the slot as soon as the running match releases
+#: it, without hammering Solari in the meantime.
+SANDBOX_RETRY_INITIAL_DELAY_SECONDS = 5.0
+SANDBOX_RETRY_MAX_DELAY_SECONDS = 30.0
 
 
 class SandboxManager:
@@ -49,26 +62,51 @@ class SandboxManager:
         return sbx
 
     async def get_or_create_sandbox(
-        self, match_id: str, config: SandboxConfig | None = None
-    ):
-        """Return the match sandbox, creating it exactly once when absent."""
+        self,
+        match_id: str,
+        config: SandboxConfig | None = None,
+        *,
+        wait_seconds: float | None = None,
+    ) -> Sandbox:
+        """Return the match sandbox, creating it once a Solari slot is free.
+
+        Solari allows one live sandbox at a time, so a match requested while
+        another is still running waits here instead of failing: it keeps
+        re-attempting until the running match releases its sandbox, then
+        creates its own. The wait is bounded so a match cannot hang forever if
+        Solari never frees a slot.
+        """
         existing = self.sandboxes.get(match_id)
         if existing is not None:
             return existing
-        for attempt in range(3):
+
+        budget = SANDBOX_WAIT_SECONDS if wait_seconds is None else wait_seconds
+        deadline = time.monotonic() + budget
+        delay = SANDBOX_RETRY_INITIAL_DELAY_SECONDS
+        attempt = 0
+        while True:
+            attempt += 1
             try:
-                sbx = await self.create_new_sandbox(
+                return await self.create_new_sandbox(
                     match_id=match_id, config=config or SandboxConfig()
                 )
-                # self.sandboxes[match_id] = sbx
-                return sbx
-            except ConcurrencyLimitError as e:
-                logger.fatal(
-                    f"Concurrency limit error (attempt {attempt + 1}/3), retrying after 30s..."
+            except ConcurrencyLimitError as error:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    logger.error(
+                        f"No Solari sandbox slot became free for match {match_id} "
+                        f"after {attempt} attempts over {budget:g}s"
+                    )
+                    raise ConcurrencyLimitError(
+                        f"No sandbox slot became available for match {match_id}"
+                    ) from error
+                wait = min(delay, remaining)
+                logger.info(
+                    f"Sandbox slot unavailable for match {match_id} "
+                    f"(attempt {attempt}); retrying in {wait:g}s"
                 )
-                if attempt == 2:  # Last attempt failed, re-raise or handle accordingly
-                    raise ConcurrencyLimitError("Failed to create a sandbox instance")
-                await asyncio.sleep(30)
+                await asyncio.sleep(wait)
+                delay = min(delay * 2, SANDBOX_RETRY_MAX_DELAY_SECONDS)
 
     async def get_sandbox(self, match_id: str) -> Sandbox:
         try:
@@ -77,18 +115,24 @@ class SandboxManager:
             raise KeyError(f"No sandbox exists for match {match_id!r}") from error
 
     async def destroy_sandbox(self, match_id: str) -> None:
-        sbx = await self.get_sandbox(match_id)
-        for unwatch in self._file_unwatchers.pop(match_id, []):
-            await unwatch()
-        await self.client.kill(sbx)
-        self.sandboxes.pop(match_id, None)
-        self._process_watches.pop(match_id, None)
-        self._auto_kill_rules.pop(match_id, None)
-        self._monitors.pop(match_id, None)
+        """Release the match sandbox and every per-match registry entry.
+
+        Tolerates a sandbox that was never created: setup can fail before one
+        exists (for example after waiting out the Solari concurrency limit),
+        and cleanup must not replace that failure with a lookup error.
+        """
         task = self._process_tasks.pop(match_id, None)
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        sbx = self.sandboxes.pop(match_id, None)
+        for unwatch in self._file_unwatchers.pop(match_id, []):
+            await unwatch()
+        if sbx is not None:
+            await self.client.kill(sbx)
+        self._process_watches.pop(match_id, None)
+        self._auto_kill_rules.pop(match_id, None)
+        self._monitors.pop(match_id, None)
         logger.info(f"Sandbox destroyed. Currently active: {len(self.sandboxes)}")
 
     async def run_command(
@@ -122,7 +166,7 @@ class SandboxManager:
         would bypass prisoner/warden permissions.
         """
         try:
-            validated_path = self._validate_path(path, user)
+            validated_path = self._validate_path(path)
             return await self.run_command(
                 match_id=match_id,
                 command=f"cat -- {shlex.quote(validated_path)}",
@@ -140,7 +184,7 @@ class SandboxManager:
         locations fail instead of bypassing prisoner/warden permissions.
         """
         try:
-            validated_path = self._validate_path(path, user)
+            validated_path = self._validate_path(path)
             parent = str(PurePosixPath(validated_path).parent)
             encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
             mkdir = (
@@ -227,13 +271,16 @@ class SandboxManager:
         return f"/home/{user}/scratchpad.txt"
 
     @staticmethod
-    def _validate_path(path: str, user: str) -> str:
+    def _validate_path(path: str) -> str:
+        """Sanity-check a model-provided path and return it unchanged.
+
+        Paths are used exactly as given: an absolute path stays absolute and a
+        relative path resolves against the acting user's working directory.
+        There is deliberately no workspace scoping here -- the acting user's OS
+        permissions are the only boundary on what can be read or written.
+        """
         if not path or "\x00" in path:
             raise ValueError("Invalid path")
-        if path.__contains__("~"):
-            raise ValueError("Cannont contain `~`")
-        if path.startswith("/"):
-            path = path.removeprefix("/")
         return path
 
     @staticmethod

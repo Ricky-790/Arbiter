@@ -27,26 +27,27 @@ function HomePage() {
   return (
     <main className="mx-auto max-w-6xl px-5 py-12 lg:px-8">
       <h1 className="mt-5 max-w-3xl font-display text-5xl font-bold sm:text-6xl">
-        Conflict is the benchmark.
+        AI vs AI, Inside a Locked Room
       </h1>
       <p className="mt-6 max-w-3xl text-sm leading-7 text-muted-foreground">
-        Arbiter is an arena for measuring autonomous reasoning under pressure.
-        Every match places two language-model agents inside the same
-        deterministic, developer-authored challenge—one searching for a way out,
-        the other closing every door.
+        Drop two LLM agents into the same sandboxed environment with a fixed set
+        of tools, a limited budget, and a time limit. One agent tries to
+        break/exploit the sandbox — like reading a secret file — and the other
+        is tries to stop it. Every match runs against the same pre-defined
+        challenge, so results are comparable across agents and models.
       </p>
       <div className="mt-14 grid border-y border-border md:grid-cols-2">
         <Role
-          title="PRISONER"
-          subtitle="OFFENSIVE AGENT"
+          title="PRISONER AGENT"
+          subtitle="Attacker"
           icon={<Crosshair />}
-          text="Find the secret. Change the state. Submit the flag. The Prisoner probes files, users, services, and execution paths to complete the challenge objective before containment closes."
+          text="Trying to complete the objective maybe reading a secret file, escalating access, or changing some piece of state - before time or budget runs out. Has to explore the sandbox, figure out what's there, and act without knowing what the Warden has already changed."
         />
         <Role
-          title="WARDEN"
-          subtitle="DEFENSIVE AGENT"
+          title="WARDEN AGENT"
+          subtitle="Defender"
           icon={<Shield />}
-          text="Observe the sandbox. Detect hostile intent. Deploy traps. The Warden monitors actions and modifies the environment to prevent the Prisoner's objective."
+          text="Watches what the Prisoner does and modifies the sandbox to block it - locking files, killing processes, changing permissions, laying traps. Doesn't know the Prisoner's exact plan, only what actions it's taking."
         />
       </div>
       <section className="mt-16">
@@ -56,19 +57,19 @@ function HomePage() {
               icon: Activity,
               n: "01",
               title: "CONCURRENT ACTION",
-              text: "Agents act continuously rather than taking strict alternating turns.",
+              text: "Both agents act in the same time window instead of taking clean alternating turns, so timing and reaction speed matter.",
             },
             {
               icon: Timer,
               n: "02",
               title: "BOUNDED RESOURCES",
-              text: "Credits, action cooldowns, and wall-clock limits constrain every strategy.",
+              text: "Every tool call costs credits, and each agent has a fixed budget plus a wall-clock limit — so agents have to plan, not just brute-force every option.",
             },
             {
               icon: Shield,
               n: "03",
               title: "DETERMINISTIC ARENAS",
-              text: "Authored systems, services, and win conditions make every result auditable.",
+              text: "Each challenge is deterministic with a fixed environment and a clear win condition, so match outcomes can be checked programmatically instead of vaguely judged.",
             },
           ].map((item) => (
             <article key={item.n} className="bg-background p-6">

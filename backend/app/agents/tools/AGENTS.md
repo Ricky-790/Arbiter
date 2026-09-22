@@ -17,6 +17,7 @@ The current registry includes:
 - `kill_process`
 - `auto_kill`
 - `block_network`
+- `peek_prisoner_logs`
 - `submit_flag`
 - `pass`
 
@@ -110,9 +111,21 @@ Keep these capabilities distinct.
 
 ### `write_file(path, content)`
 
-Writes a normal file inside the actor's sandbox workspace.
+Writes a file at the path the model gives, inside the actor's sandbox.
 
-The path is validated/scoped by `SandboxManager`.
+The path is used as given: absolute paths stay absolute, relative paths resolve
+against the acting user's working directory. The acting user's OS permissions
+are the only boundary, so `SandboxManager` applies no workspace scoping.
+
+### `peek_prisoner_logs(count)`
+
+Warden-only. Returns the last `count` entries of the shared Prisoner activity
+log at `/tmp/prisoner_logs`.
+
+The Engine mirrors every Prisoner tool call there (name plus arguments, never
+the result). The file is root-owned and world-readable, so the Warden can read
+it but the Prisoner cannot tamper with it. Private Prisoner calls
+(`submit_flag`, scratchpad writes, scratchpad reads) are never mirrored.
 
 ### `write_to_scratchpad(content)`
 

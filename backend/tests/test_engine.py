@@ -1,5 +1,9 @@
+import asyncio
 import unittest
 
+from solari_core import ConcurrencyLimitError
+
+from app.agents.base import AgentUnavailableError
 from app.agents.models import AgentType
 from app.agents.tools import ToolCall, ToolResult
 from app.engine import Engine, MatchStatus
@@ -187,3 +191,80 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(scratch.success)
         self.assertTrue(bash.success)
         self.assertEqual(engine.state.prisoner.credits, 48)
+
+
+class UnavailableSandboxManager(FakeSandboxManager):
+    """Stands in for a Solari account whose only slot is still occupied."""
+
+    async def get_or_create_sandbox(self, match_id: str, config: object) -> object:
+        raise ConcurrencyLimitError("sandbox limit reached")
+
+
+class SandboxSetupFailureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_never_obtaining_a_sandbox_reports_its_real_error(self) -> None:
+        """Cleanup after a failed setup must not hide why setup failed.
+
+        Cleanup once looked the sandbox up and raised ``No sandbox exists for
+        match``, replacing the actual reason the match could not start.
+        """
+        manager = UnavailableSandboxManager()
+        engine = Engine(
+            match_id="match-waiting",
+            challenge=ChallengeSpec(
+                name="test",
+                description="test",
+                flag={"value": "ARB{flag}"},
+            ),
+            sandbox_manager=manager,  # type: ignore[arg-type]
+        )
+
+        with self.assertRaises(ConcurrencyLimitError):
+            await engine.run_agents(object(), object())
+
+        self.assertEqual(manager.destroyed_match_id, "match-waiting")
+        self.assertNotEqual(engine.state.status, MatchStatus.RUNNING)
+
+
+class StubAgent:
+    """Minimal ``AgentActionSource``; the Engine never reaches the sandbox."""
+
+    def bind_tool_executor(self, executor: object) -> None:
+        pass
+
+    def bind_event_reporter(self, reporter: object) -> None:
+        pass
+
+    async def run_turn(self, scratchpad: str = "") -> str | None:
+        await asyncio.sleep(0.01)
+        return "idle"
+
+
+class UnavailableAgent(StubAgent):
+    """An agent whose provider stayed failing past its in-turn retry budget."""
+
+    async def run_turn(self, scratchpad: str = "") -> str | None:
+        raise AgentUnavailableError(
+            "Model unavailable after 3 attempts (last status 429)"
+        )
+
+
+class AgentUnavailableTests(unittest.IsolatedAsyncioTestCase):
+    async def test_an_unavailable_warden_ends_the_match_immediately(self) -> None:
+        """Exhausted retries must stop the match, not leave it hanging."""
+        manager = FakeSandboxManager()
+        engine = Engine(
+            match_id="match-1",
+            challenge=ChallengeSpec(
+                name="test",
+                description="test",
+                flag={"value": "ARB{flag}"},
+            ),
+            sandbox_manager=manager,  # type: ignore[arg-type]
+        )
+
+        await engine.run_agents(StubAgent(), UnavailableAgent())
+
+        self.assertEqual(engine.state.status, MatchStatus.FINISHED)
+        self.assertEqual(engine.state.winner, AgentType.PRISONER)
+        self.assertIn("not available", engine.state.end_reason or "")
+        self.assertEqual(manager.destroyed_match_id, "match-1")

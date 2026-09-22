@@ -15,7 +15,7 @@ cursor.execute("""SELECT
     trace_id,
     attributes
 FROM records
-WHERE attributes->>'arbiter.match_id' = '87e67081-28d0-4e2a-b139-b98be487b0d9'
+WHERE attributes->>'arbiter.match_id' = '792754fc-d80b-44c4-ae74-555b17497673'
 ORDER BY start_timestamp ASC;""")
 rows = cursor.fetchall()
 with open("a.json", "w") as f:
