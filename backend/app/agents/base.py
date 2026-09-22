@@ -35,6 +35,18 @@ class AgentUnavailableError(Exception):
     """
 
 
+def with_tips(instructions: str, tips: str | None) -> str:
+    """Append optional operator tips to an agent's base role instructions.
+
+    Tips come from the match request (``prisoner_suggestions`` /
+    ``warden_suggestions``). Empty or whitespace-only input is ignored, so a
+    blank form field leaves the role instructions untouched.
+    """
+    if tips is None or tips.strip() == "":
+        return instructions
+    return f"{instructions}\n\nTips: {tips.strip()}"
+
+
 def _function_signature_to_json_schema(tool: Any) -> dict[str, Any]:
     """Build a minimal JSON schema for a BaseTool's execute() method."""
     sig = inspect.signature(tool.execute)

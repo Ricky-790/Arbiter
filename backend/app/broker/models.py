@@ -19,4 +19,8 @@ class MatchStartMessage(BaseModel):
     challenge_id: UUID
     prisoner_model: str
     warden_model: str
+    #: Optional operator tips, forwarded verbatim to the worker and appended to
+    #: the matching agent's role instructions.
+    prisoner_suggestions: str | None = None
+    warden_suggestions: str | None = None
     timeout_seconds: float | None = None

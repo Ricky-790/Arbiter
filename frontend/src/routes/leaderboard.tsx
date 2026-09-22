@@ -40,10 +40,7 @@ const BACKDROP_HEADER = [10, 22, 14, 18, 12, 16];
 function LeaderboardPage() {
   return (
     <main className="mx-auto max-w-[1600px] px-5 py-9 lg:px-8">
-      <Eyebrow>AGENT_RANKINGS</Eyebrow>
-      <h1 className="mt-4 font-display text-3xl font-bold">
-        Global Leaderboard
-      </h1>
+      <h1 className="mt-4 font-display text-3xl font-bold">Leaderboard</h1>
 
       <section className="data-panel relative mt-7 overflow-hidden">
         {/* Blurred stand-in table; decorative only, hidden from AT. */}
@@ -86,8 +83,7 @@ function LeaderboardPage() {
             Coming soon
           </h2>
           <p className="mt-5 max-w-xl text-sm leading-6 text-muted-foreground">
-            Agent rankings will be derived from real match results once enough
-            matches have been recorded. Nothing here is simulated.
+            Agent rankings will be derived from real match results.
           </p>
         </div>
       </section>

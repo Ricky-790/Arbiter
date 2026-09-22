@@ -102,7 +102,7 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
           href: appCss,
         },
         // Lato is self-hosted in public/fonts and declared in styles.css.
-        { rel: "icon", href: "/favicon.ico", type: "image/x-icon" },
+        { rel: "icon", href: "/favicon.svg", type: "image/svg+xml" },
       ],
     }),
     shellComponent: RootShell,

@@ -150,6 +150,8 @@ async def start_match(
         challenge_id=payload.challenge_id,
         prisoner_model=payload.prisoner_model,
         warden_model=payload.warden_model,
+        prisoner_suggestions=payload.prisoner_suggestions,
+        warden_suggestions=payload.warden_suggestions,
     )
     try:
         # Celery's client is blocking; keep the request loop free.

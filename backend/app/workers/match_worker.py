@@ -64,10 +64,12 @@ async def run_match(message: MatchStartMessage) -> dict[str, Any]:
         prisoner = PrisonerAgent(
             model_name=message.prisoner_model,
             objective=prisoner_objective(spec),
+            instructions=message.prisoner_suggestions,
         )
         warden = WardenAgent(
             model_name=message.warden_model,
             objective=warden_objective(spec),
+            instructions=message.warden_suggestions,
         )
 
         match_metadata = build_match_metadata(message, spec)

@@ -1,6 +1,6 @@
 from collections.abc import Iterable
 
-from app.agents.base import ToolChoosingAgent
+from app.agents.base import ToolChoosingAgent, with_tips
 from app.agents.tools.models import ToolCall
 
 from .instructions import WARDEN_INSTRUCTIONS
@@ -12,11 +12,14 @@ class WardenAgent(ToolChoosingAgent):
         model_name: str = "google/gemini-3.1-flash-lite",
         *,
         objective: str | None = None,
+        instructions: str | None = None,
         scripted_calls: Iterable[ToolCall] | None = None,
     ) -> None:
+        """``instructions`` are optional operator tips appended to the role
+        instructions (see :func:`app.agents.base.with_tips`)."""
         super().__init__(
             model_name=model_name,
-            instructions=WARDEN_INSTRUCTIONS,
+            instructions=with_tips(WARDEN_INSTRUCTIONS, instructions),
             allowed_tools={
                 "bash",
                 "read_file",

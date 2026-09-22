@@ -36,6 +36,8 @@ function LaunchPage() {
   const { challengeId = "" } = Route.useSearch();
   const [prisonerModel, setPrisonerModel] = useState("");
   const [wardenModel, setWardenModel] = useState("");
+  const [prisonerSuggestions, setPrisonerSuggestions] = useState("");
+  const [wardenSuggestions, setWardenSuggestions] = useState("");
 
   const modelsQuery = useQuery({
     queryKey: ["free-models"],
@@ -54,6 +56,8 @@ function LaunchPage() {
         challenge_id: challengeId,
         prisoner_model: prisonerModel,
         warden_model: wardenModel,
+        prisoner_suggestions: prisonerSuggestions.trim() || null,
+        warden_suggestions: wardenSuggestions.trim() || null,
       }),
     onSuccess: (response) => {
       navigate({
@@ -138,6 +142,8 @@ function LaunchPage() {
           onChange={setPrisonerModel}
           models={models.filter((model) => model !== wardenModel)}
           loading={modelsQuery.isPending}
+          suggestions={prisonerSuggestions}
+          onSuggestionsChange={setPrisonerSuggestions}
         />
         <ModelSelect
           label="WARDEN"
@@ -146,6 +152,8 @@ function LaunchPage() {
           onChange={setWardenModel}
           models={models.filter((model) => model !== prisonerModel)}
           loading={modelsQuery.isPending}
+          suggestions={wardenSuggestions}
+          onSuggestionsChange={setWardenSuggestions}
         />
       </div>
 
@@ -196,6 +204,8 @@ function ModelSelect({
   onChange,
   models,
   loading,
+  suggestions,
+  onSuggestionsChange,
 }: {
   label: string;
   hint: string;
@@ -203,18 +213,21 @@ function ModelSelect({
   onChange: (value: string) => void;
   models: string[];
   loading: boolean;
+  suggestions: string;
+  onSuggestionsChange: (value: string) => void;
 }) {
   return (
-    <label className="data-panel block p-5">
+    <div className="data-panel p-5">
       <span className="flex items-baseline justify-between">
         <span className="text-sm font-bold text-primary">{label}</span>
-        <span className="text-[10px] text-muted-foreground">{hint}</span>
+        <span className="text-[11px] text-muted-foreground">{hint}</span>
       </span>
       <select
         value={value}
         onChange={(event) => onChange(event.target.value)}
         disabled={loading}
-        className="mt-4 w-full border border-border bg-background px-3 py-3 text-[11px] text-foreground"
+        aria-label={`${label} model`}
+        className="mt-4 w-full border border-border bg-background px-3 py-3 text-sm text-foreground"
       >
         <option value="">
           {loading ? "LOADING MODELS..." : "SELECT MODEL"}
@@ -225,6 +238,19 @@ function ModelSelect({
           </option>
         ))}
       </select>
-    </label>
+
+      {/* Shown only once a model is chosen, so the form stays compact. */}
+      {value !== "" && (
+        <textarea
+          value={suggestions}
+          onChange={(event) => onSuggestionsChange(event.target.value)}
+          placeholder="Any suggestions for the agent..."
+          rows={3}
+          maxLength={2000}
+          aria-label={`${label} suggestions`}
+          className="mt-3 w-full resize-y border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground"
+        />
+      )}
+    </div>
   );
 }

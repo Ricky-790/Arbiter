@@ -68,6 +68,9 @@ export type StartMatchRequest = {
   challenge_id: string;
   prisoner_model: string;
   warden_model: string;
+  /** Optional operator tips appended to the agent's role instructions. */
+  prisoner_suggestions: string | null;
+  warden_suggestions: string | null;
 };
 
 /** `StartMatchResponse` — acknowledged queued match. */

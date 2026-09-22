@@ -114,6 +114,9 @@ class StartMatchRequest(BaseModel):
     challenge_id: UUID
     prisoner_model: str
     warden_model: str
+    #: Optional free-text tips appended to each agent's role instructions.
+    prisoner_suggestions: str | None = None
+    warden_suggestions: str | None = None
 
 
 class StartMatchResponse(BaseModel):

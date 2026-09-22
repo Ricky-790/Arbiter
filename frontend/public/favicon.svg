@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Arbiter">
+  <path
+    fill="#FACC15"
+    stroke="#0f0f12"
+    stroke-width="1.6"
+    stroke-linejoin="round"
+    d="M16 3.2 5.9 6.9a1.1 1.1 0 0 0-.7 1v6.3c0 6.2 4.1 11.8 10.3 14.2a1.4 1.4 0 0 0 1 0c6.2-2.4 10.3-8 10.3-14.2V7.9a1.1 1.1 0 0 0-.7-1L16 3.2Z"
+  />
+</svg>
