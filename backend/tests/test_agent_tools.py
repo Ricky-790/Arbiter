@@ -41,8 +41,8 @@ class RecordingContext:
     ) -> ToolResult:
         return await self._result("block_network", ip=ip, port=port)
 
-    async def submit_flag(self, *, flag: str) -> ToolResult:
-        return await self._result("submit_flag", flag=flag)
+    async def submit_flag(self, *, response: dict[str, object]) -> ToolResult:
+        return await self._result("submit_flag", response=response)
 
     async def pass_turn(self) -> ToolResult:
         return await self._result("pass_turn")
@@ -94,7 +94,11 @@ class ToolDelegationTests(unittest.IsolatedAsyncioTestCase):
         registry = build_default_registry()
 
         self.assertTrue(
-            (await registry.get("submit_flag").execute(context, flag="ARB{candidate}")).success
+            (
+                await registry.get("submit_flag").execute(
+                    context, response={"value": "ARB{candidate}"}
+                )
+            ).success
         )
         self.assertTrue(
             (await registry.get("watch_file").execute(context, path="/tmp/secret")).success
@@ -108,7 +112,7 @@ class ToolDelegationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             context.calls,
             [
-                ("submit_flag", {"flag": "ARB{candidate}"}),
+                ("submit_flag", {"response": {"value": "ARB{candidate}"}}),
                 ("watch_file", {"path": "/tmp/secret"}),
                 ("kill_process", {"pid": 12}),
                 ("block_network", {"ip": "10.0.0.1", "port": 443}),

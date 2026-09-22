@@ -1,6 +1,8 @@
 import os
 
 from dotenv import load_dotenv
+from pydantic_ai import ModelSettings
+from pydantic_ai.agent import Agent
 from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.models.groq import GroqModel
 from pydantic_ai.models.openai import OpenAIChatModel
@@ -17,13 +19,16 @@ nvidia_provider = OpenAIProvider(
     base_url="https://integrate.api.nvidia.com/v1",
     api_key=os.getenv("NVIDIA_API_KEY", ""),
 )
-
+token_router_provider = OpenAIProvider(
+    base_url="https://api.tokenrouter.com/v1", api_key=os.getenv("TOKENROUTER_API_KEY")
+)
 # groq_provider = GroqProvider()
 openrouter_provider = OpenRouterProvider()
 google_provider = GoogleProvider(api_key=os.getenv("GOOGLE_API_KEY", ""))
 
 # Models
 laguna = OpenAIChatModel(model_name="poolside/laguna-xs-2.1", provider=nvidia_provider)
+gemini_3_6 = GoogleModel(model_name="gemini-3.6-flash", provider=google_provider)
 gemini_3_1 = GoogleModel(model_name="gemini-3.1-flash-lite", provider=google_provider)
 liquid_ai_lfm = OpenRouterModel(
     model_name="liquid/lfm-2.5-2.6b:free", provider=openrouter_provider
@@ -31,14 +36,40 @@ liquid_ai_lfm = OpenRouterModel(
 minimax_m3 = OpenAIChatModel(
     model_name="minimaxai/minimax-m3", provider=nvidia_provider
 )
-nex_n2_5 = OpenRouterModel(
-    model_name="nex-agi/nex-n2.5-pro:free", provider=openrouter_provider
+ling_3_flash = OpenRouterModel(
+    model_name="inclusionai/ling-3.0-flash-vl:free", provider=openrouter_provider
 )
-
+settings = ModelSettings(temperature=0.5, thinking="low")
+glm_5_3 = OpenAIChatModel(model_name="z-ai/glm-5.3-flash", provider=nvidia_provider)
+deepseek_v4_flash = OpenAIChatModel(
+    model_name="deepseek-ai/deepseek-v4-flash-0731",
+    provider=nvidia_provider,
+    settings=settings,
+)
 agent_mapper = {
-    "laguna-xs-2.1": laguna,
-    "gemini-3.1-flash-lite": gemini_3_1,
-    "lfm-2.5-2.6b": liquid_ai_lfm,
-    "minimax-m3": minimax_m3,
-    "nex-n2.5-pro": nex_n2_5,
+    "nvidia/laguna-xs-2.1": laguna,
+    "google/gemini-3.6-flash": gemini_3_6,
+    "openrouter/lfm-2.5-2.6b": liquid_ai_lfm,
+    "nvidia/minimax-m3": minimax_m3,
+    "openrouter/ling-3.0-flash": ling_3_flash,
+    "nvidia/glm-5.3": glm_5_3,
+    "google/gemini-3.1-flash-lite": gemini_3_1,
+    "nvidia/deepseek-v4-flash-0731": deepseek_v4_flash,
 }
+
+
+def split_model_name(model_name: str) -> tuple[str, str]:
+    """Split a ``provider/model`` key into ``(provider, model)``.
+
+    The ``matches`` table stores the provider and model in separate columns,
+    while the API and queue carry the combined ``provider/model`` key.
+    """
+    provider, separator, model = model_name.partition("/")
+    if not separator:
+        return "unknown", model_name
+    return provider, model
+
+
+# agent = Agent(gemini_3_6, output_type=str)
+# result = agent.run_sync("Whats 2+2")
+# print(result.output)

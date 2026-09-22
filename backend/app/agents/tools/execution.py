@@ -4,7 +4,7 @@ The future Engine supplies a per-action context implementing this protocol.
 Tools must not construct a SandboxManager or know a match identifier.
 """
 
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from .models import ToolResult
 
@@ -31,6 +31,6 @@ class ToolExecutionContext(Protocol):
         self, *, ip: str | None = None, port: int | None = None
     ) -> ToolResult: ...
 
-    async def submit_flag(self, *, flag: str) -> ToolResult: ...
+    async def submit_flag(self, *, response: dict[str, Any]) -> ToolResult: ...
 
     async def pass_turn(self) -> ToolResult: ...

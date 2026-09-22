@@ -1,3 +1,6 @@
 .env
 .venv/
 __pycache__/
+.logfire/
+.pytest_cache/
+

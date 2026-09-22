@@ -7,8 +7,9 @@ All helpers degrade to no-ops until ``configure_observability()`` succeeds
 """
 
 from .logfire import (
+    agent_observability_context,
     configure_observability,
-    is_enabled,
+    match_span,
     output_telemetry,
     record_match_event,
     set_span_attributes,
@@ -16,8 +17,9 @@ from .logfire import (
 )
 
 __all__ = [
+    "agent_observability_context",
     "configure_observability",
-    "is_enabled",
+    "match_span",
     "output_telemetry",
     "record_match_event",
     "set_span_attributes",

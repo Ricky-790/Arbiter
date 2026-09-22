@@ -24,7 +24,7 @@ class MatchStatus(str, Enum):
 
 
 class AgentState(BaseModel):
-    credits: int = 50
+    credits: int = 100
     cooldown_until: datetime | None = None
     reaction_until: datetime | None = None
     last_result: ToolResult | None = None
@@ -46,7 +46,7 @@ class MatchState(BaseModel):
     # Immediately after a trigger, this trap cannot be armed as the Warden's
     # next action. It is cleared after any other successful Warden action.
     blocked_trap_name: str | None = None
-    submitted_flag: str | None = None
+    submitted_flag: dict[str, Any] | None = None
     winner: AgentType | None = None
     end_reason: str | None = None
     started_at: datetime | None = None

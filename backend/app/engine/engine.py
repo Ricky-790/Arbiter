@@ -1,26 +1,24 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import shlex
-from datetime import timedelta
+from collections.abc import Awaitable, Callable
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
-import logfire
+from pydantic_ai import ToolReturn
 
+from app.agents.base import AgentUnavailableError
 from app.agents.models import AgentType
-from app.agents.tokens import (
-    count_tokens,
-    lower_limit_notice,
-    lower_token_limit,
-    upper_limit_notice,
-    upper_limit_redaction,
-    upper_token_limit,
-)
 from app.agents.tools import ToolCall, ToolExecutionContext, ToolRegistry, ToolResult
 from app.agents.tools.registry import build_default_registry
+from app.db.match_log import store_match_activity
 from app.logger import get_logger
 from app.observability import (
+    agent_observability_context,
+    match_span,
     output_telemetry,
     record_match_event,
     set_span_attributes,
@@ -33,15 +31,22 @@ from .cooldowns import CooldownManager
 from .credits import CreditManager
 from .models import MatchState, MatchStatus, utc_now
 from .traps import TRAP_TOOL_NAMES, TrapManager
+from .verification import parse_verifier_verdict, validate_submission
 
 logger = get_logger()
-# logfire.configure()
-# logfire.instrument_pydantic_ai()
+
+#: Tools exempt from credit deduction and action cooldown. File and
+#: scratchpad access is free by design; everything else is budgeted.
+FREE_TOOL_NAMES = frozenset({"read_file", "write_file", "write_to_scratchpad"})
 
 
 @runtime_checkable
 class AgentActionSource(Protocol):
-    async def next_tool_call(self, scratchpad: str = "") -> ToolCall: ...
+    def bind_tool_executor(
+        self, executor: Callable[[str, dict[str, Any]], Awaitable[Any]]
+    ) -> None: ...
+
+    async def run_turn(self, scratchpad: str = "") -> str | None: ...
 
 
 class EngineExecutionContext(ToolExecutionContext):
@@ -105,14 +110,51 @@ class EngineExecutionContext(ToolExecutionContext):
             match_id=self.engine.state.match_id, ip=ip, port=port
         )
 
-    async def submit_flag(self, *, flag: str) -> ToolResult:
-        self.engine.state.submitted_flag = flag
-        if flag == self.engine.state.challenge.flag:
-            self.engine.finish(
-                winner=AgentType.PRISONER, end_reason="correct flag submitted"
+    async def submit_flag(self, *, response: dict[str, Any]) -> ToolResult:
+        """Validate a structured submission, then judge it.
+
+        The submission's shape is checked against the challenge's
+        ``flag_structure`` first. A challenge with a ``verifier_script`` is
+        judged inside the sandbox; otherwise the submission is compared with
+        the stored ``flag``. The Engine alone decides the winner.
+        """
+        challenge = self.engine.state.challenge
+
+        structure_error = validate_submission(response, challenge.flag_structure)
+        if structure_error:
+            return ToolResult(
+                success=False,
+                error=(
+                    "Submission does not match the expected structure: "
+                    f"{structure_error}"
+                ),
             )
-            return ToolResult(success=True, output="Correct flag submitted.")
-        return ToolResult(success=True, output="Flag submitted for evaluation.")
+
+        self.engine.state.submitted_flag = response
+
+        if challenge.verifier_script:
+            success, reason = await self.engine.run_verifier_script(response)
+            if success:
+                self.engine.finish(
+                    winner=AgentType.PRISONER,
+                    end_reason=f"verifier accepted the submission: {reason}",
+                )
+                return ToolResult(success=True, output=reason)
+            return ToolResult(
+                success=False, error=f"Verifier rejected the submission: {reason}"
+            )
+
+        if response == challenge.flag:
+            self.engine.finish(
+                winner=AgentType.PRISONER, end_reason="correct submission"
+            )
+            return ToolResult(success=True, output="Correct submission accepted.")
+        return ToolResult(
+            success=False,
+            error=(
+                "Incorrect submission. Review the expected structure and try again."
+            ),
+        )
 
     async def pass_turn(self) -> ToolResult:
         return ToolResult(success=True, output="Passed.")
@@ -129,6 +171,8 @@ class Engine:
         sandbox_manager: SandboxManager,
         registry: ToolRegistry | None = None,
         cooldown_seconds: float = 5.0,
+        event_sink: Callable[[dict[str, Any]], None] | None = None,
+        match_metadata: dict[str, Any] | None = None,
     ) -> None:
         self.state = MatchState(match_id=match_id, challenge=challenge)
         self.sandbox_manager = sandbox_manager
@@ -136,6 +180,8 @@ class Engine:
         self.credits = CreditManager()
         self.cooldowns = CooldownManager(timedelta(seconds=cooldown_seconds))
         self.traps = TrapManager()
+        self.event_sink = event_sink
+        self.match_metadata = match_metadata
         self._action_lock = asyncio.Lock()
         self._stop_event = asyncio.Event()
         logger.info("Game engine instance initialized")
@@ -164,132 +210,209 @@ class Engine:
                 )
         self.state.status = MatchStatus.RUNNING
         self.state.started_at = utc_now()
-        self._record("match_started")
-        record_match_event(
+        event = self._record("match_started")
+        await self._persist(
             "match_started",
-            match_id=self.state.match_id,
-            challenge=self.state.challenge.name,
+            action={"challenge": self.state.challenge.name},
+            timestamp=event["timestamp"],
+            match=self._match_snapshot(
+                status="running", started_at=self.state.started_at
+            ),
         )
         logger.info("Match is running")
 
-    async def execute_tool_call(self, actor: AgentType, call: ToolCall) -> ToolResult:
-        """Validate, charge, cool down, and delegate one agent-requested action."""
-        async with self._action_lock:
-            if self.state.status is not MatchStatus.RUNNING:
-                logger.warning("Match not running")
-                record_match_event(
-                    "tool_rejected",
-                    match_id=self.state.match_id,
-                    actor=actor.value,
-                    tool=call.name,
-                    failure_category="match_not_running",
-                    success=False,
-                )
-                return ToolResult(success=False, error="Match is not running")
-            try:
-                tool = self.registry.get(call.name)
-            except KeyError:
-                logger.fatal(
-                    f"LLM called non-existent tool. tool: {call.name}, args: {call.arguments}"
-                )
-                record_match_event(
-                    "tool_rejected",
-                    match_id=self.state.match_id,
-                    actor=actor.value,
-                    tool=call.name,
-                    failure_category="tool_not_found",
-                    success=False,
-                )
-                return ToolResult(success=False, error=f"Unknown tool: {call.name}")
-            if not tool.is_available_to(actor):
-                logger.fatal(f"Tool call fail: {actor.value} cannot use {call.name}")
-                record_match_event(
-                    "tool_rejected",
-                    match_id=self.state.match_id,
-                    actor=actor.value,
-                    tool=call.name,
-                    failure_category="tool_not_allowed",
-                    success=False,
-                )
-                return ToolResult(
-                    success=False, error=f"{actor.value} cannot use {call.name}"
-                )
-            if not self.cooldowns.can_act(self.state, actor):
-                logger.warning(f"{actor} tool call: On Cooldown ")
-                record_match_event(
-                    "tool_rejected",
-                    match_id=self.state.match_id,
-                    actor=actor.value,
-                    tool=call.name,
-                    failure_category="cooldown",
-                    success=False,
-                )
-                return ToolResult(success=False, error="Tool cooldown is active")
-            if not self.credits.can_afford(self.state, actor, tool.cost):
-                logger.warning(f"{actor} tool call: Low Credits")
-                record_match_event(
-                    "tool_rejected",
-                    match_id=self.state.match_id,
-                    actor=actor.value,
-                    tool=call.name,
-                    failure_category="insufficient_credits",
-                    success=False,
-                )
-                return ToolResult(success=False, error="Insufficient credits")
-            if actor is AgentType.WARDEN:
-                trap_error = self.traps.validate_arm(self.state, call)
-                if trap_error:
-                    logger.warning(f"Trap set failed: {trap_error}")
-                    record_match_event(
-                        "tool_rejected",
-                        match_id=self.state.match_id,
-                        actor=actor.value,
-                        tool=call.name,
-                        failure_category="trap_blocked",
-                        success=False,
-                    )
-                    return ToolResult(success=False, error=trap_error)
+    async def run_verifier_script(self, submission: dict[str, Any]) -> tuple[bool, str]:
+        """Run the challenge's in-sandbox verifier and interpret its verdict.
 
-            self.credits.deduct(self.state, actor, tool.cost)
-            self.cooldowns.start(self.state, actor)
-            context = EngineExecutionContext(self, actor)
-            with tool_execution_span(
-                match_id=self.state.match_id, actor=actor.value, tool=call.name
-            ) as span:
-                result = await tool.execute(context, **call.arguments)
+        The submitted answer is exposed to the script both as the
+        ``ARBITER_SUBMITTED_FLAG`` environment variable (JSON) and on stdin.
+        The script is expected to print ``{"success": bool, "reason": str}``;
+        anything unparseable is a rejection (the Engine never guesses a win).
+        """
+        script = self.state.challenge.verifier_script
+        if not script:
+            return False, "no verifier script configured"
+
+        payload = json.dumps(submission)
+        quoted = shlex.quote(payload)
+        command = (
+            f"printf %s {quoted} | "
+            f"ARBITER_SUBMITTED_FLAG={quoted} sh -c {shlex.quote(script)}"
+        )
+        result = await self.sandbox_manager.run_command(
+            match_id=self.state.match_id, command=command, user="root"
+        )
+        return parse_verifier_verdict(
+            output=result.output,
+            exit_code=result.exit_code,
+            error=result.error,
+        )
+
+    async def execute_tool_call(self, actor: AgentType, call: ToolCall) -> ToolResult:
+        """Validate, charge, cool down, and delegate one agent-requested action.
+
+        The tool span opens as soon as the request is received, so every
+        outcome -- executed, rejected, or failed -- lands on that one span.
+        Every outcome is also persisted: the requested tool plus its arguments
+        go into ``action``, the outcome into ``result``.
+        """
+        action = {"tool": call.name, "arguments": call.arguments}
+        try:
+            async with (
+                self._action_lock  # Makes sure only one async task can access a shared resource
+            ):
+                with tool_execution_span(
+                    match_id=self.state.match_id,
+                    agent_role=actor.value,
+                    tool_name=call.name,
+                    tool_args=call.arguments,
+                ) as span:
+                    result = await self._execute_tool_call_tracked(actor, call, span)
+        except Exception as error:
+            # A crashed tool call is still part of the match history.
+            await self._persist(
+                "tool_call",
+                actor=actor.value,
+                action=action,
+                result={
+                    "success": False,
+                    "exit_code": None,
+                    "error": f"Tool execution failed: {error}",
+                },
+            )
+            raise
+        # One persisted row per requested tool call, whatever the outcome.
+        await self._persist(
+            "tool_call",
+            actor=actor.value,
+            action=action,
+            result={
+                "success": result.success,
+                "exit_code": result.exit_code,
+                "error": result.error,
+            },
+        )
+        return result
+
+    async def _execute_tool_call_tracked(
+        self, actor: AgentType, call: ToolCall, span: Any | None
+    ) -> ToolResult:
+        """Validation/execution body for one tool request; span already open."""
+
+        def reject(failure_category: str, error: str) -> ToolResult:
             set_span_attributes(
                 span,
                 {
-                    "stage": "executed",
-                    "success": result.success,
-                    "exit_code": result.exit_code,
-                    "credits_charged": tool.cost.value,
-                    **output_telemetry(result.output),
+                    "arbiter.status": "rejected",
+                    "arbiter.success": False,
+                    "arbiter.failure_category": failure_category,
+                    "arbiter.credits_charged": 0,
+                    **output_telemetry(None),
                 },
             )
-            result = self._apply_output_limits(actor, result)
-            self._agent_state(actor).last_result = result
-            self._record(
-                "tool_result", actor=actor.value, tool=call.name, success=result.success
+            record_match_event(
+                "tool_rejected",
+                match_id=self.state.match_id,
+                actor=actor.value,
+                tool=call.name,
+                failure_category=failure_category,
+                success=False,
             )
+            return ToolResult(success=False, error=error)
 
-            if actor is AgentType.WARDEN and result.success:
-                if call.name in TRAP_TOOL_NAMES:
-                    self.traps.arm(self.state, call)
-                elif self.state.blocked_trap_name is not None:
-                    self.state.blocked_trap_name = None
-            return result
+        if self.state.status is not MatchStatus.RUNNING:
+            logger.warning("Match not running")
+            return reject("match_not_running", "Match is not running")
+        try:
+            tool = self.registry.get(call.name)
+        except KeyError:
+            logger.fatal(
+                f"LLM called non-existent tool. tool: {call.name}, args: {call.arguments}"
+            )
+            return reject("tool_not_found", f"Unknown tool: {call.name}")
+        if not tool.is_available_to(actor):
+            logger.fatal(f"Tool call fail: {actor.value} cannot use {call.name}")
+            return reject("tool_not_allowed", f"{actor.value} cannot use {call.name}")
+        if not self.cooldowns.can_act(self.state, actor):
+            logger.warning(f"{actor} tool call: On Cooldown ")
+            return reject("cooldown", "Tool cooldown is active")
+        if not self.credits.can_afford(self.state, actor, tool.cost):
+            logger.warning(f"{actor} tool call: Low Credits")
+            return reject("insufficient_credits", "Insufficient credits")
+        if actor is AgentType.WARDEN:
+            trap_error = self.traps.validate_arm(self.state, call)
+            if trap_error:
+                logger.warning(f"Trap set failed: {trap_error}")
+                return reject("trap_blocked", trap_error)
+
+        # Free tools (file/scratchpad access) skip budgeting entirely:
+        # no credit deduction, no action cooldown.
+        if call.name not in FREE_TOOL_NAMES:
+            self.credits.deduct(self.state, actor, tool.cost)
+            self.cooldowns.start(self.state, actor)
+        context = EngineExecutionContext(self, actor)
+        try:
+            result = await tool.execute(context, **call.arguments)
+        except Exception:
+            set_span_attributes(
+                span,
+                {
+                    "arbiter.status": "failed",
+                    "arbiter.success": False,
+                    "arbiter.failure_category": "execution_error",
+                    "arbiter.credits_charged": tool.cost.value,
+                    **output_telemetry(None),
+                },
+            )
+            raise
+        set_span_attributes(
+            span,
+            {
+                "arbiter.status": "executed",
+                "arbiter.success": result.success,
+                "arbiter.exit_code": result.exit_code,
+                "arbiter.credits_charged": tool.cost.value,
+                **output_telemetry(result.output),
+            },
+        )
+        self._agent_state(actor).last_result = result
+        self._record(
+            "tool_result",
+            actor=actor.value,
+            tool=call.name,
+            arguments=call.arguments,
+            success=result.success,
+            exit_code=result.exit_code,
+            error=result.error,
+        )
+
+        if actor is AgentType.WARDEN and result.success:
+            if call.name in TRAP_TOOL_NAMES:
+                self.traps.arm(self.state, call)
+            elif self.state.blocked_trap_name is not None:
+                self.state.blocked_trap_name = None
+        return result
 
     async def handle_sandbox_event(self, event: SandboxEvent) -> bool:
-        """Open the Warden reaction window if the active trap matches an event."""
+        """Persist one sandbox observation and react to it if a trap matches"""
         async with self._action_lock:
-            if self.state.status is not MatchStatus.RUNNING or not self.traps.matches(
-                self.state, event
-            ):
+            if self.state.status is not MatchStatus.RUNNING:
+                return False
+            matched = self.traps.matches(self.state, event)
+            await self._persist(
+                "sandbox_event",
+                actor=event.user or "system",
+                action=event.model_dump(
+                    mode="json", exclude={"timestamp"}, exclude_none=True
+                ),
+                result={"matched_trap": matched},
+                timestamp=event.timestamp,
+            )
+            if not matched:
                 return False
             trap = self.traps.trigger(self.state)
             reaction_until = self.cooldowns.open_warden_reaction(self.state)
-            self._record(
+            recorded = self._record(
                 "trap_triggered",
                 trap=trap.tool_name if trap else None,
                 reaction_until=reaction_until.isoformat(),
@@ -299,57 +422,82 @@ class Engine:
                 match_id=self.state.match_id,
                 trap=trap.tool_name if trap else None,
             )
+            await self._persist(
+                "trap_triggered",
+                result={"trap": trap.tool_name if trap else None},
+                timestamp=recorded["timestamp"],
+            )
             return True
 
     async def run_agents(
         self,
         prisoner: AgentActionSource,
-        warden: AgentActionSource,  # this means class / object type does not matter as long as it implements next_tool_call() method
+        warden: AgentActionSource,  # this means class / object type does not matter as long as it implements run_turn() + bind_tool_executor()
         *,
         timeout_seconds: float | None = None,
     ) -> None:
         workers: list[asyncio.Task[None]] = []
         stop_waiter: asyncio.Task[bool] | None = None
         timeout_waiter: asyncio.Task[None] | None = None
-        try:
-            await self.start()
-            workers = [
-                asyncio.create_task(self._agent_loop(AgentType.PRISONER, prisoner)),
-                asyncio.create_task(self._agent_loop(AgentType.WARDEN, warden)),
-            ]
-            stop_waiter = asyncio.create_task(self._stop_event.wait())
-            timeout_waiter = (
-                asyncio.create_task(asyncio.sleep(timeout_seconds))
-                if timeout_seconds is not None
-                else None
+        # The match span stays open across setup, both agent tasks, all LLM
+        # and tool calls, finishing, and cleanup. Tasks created inside
+        # inherit its context, so the whole match lands in one trace.
+        with match_span(
+            match_id=self.state.match_id,
+            challenge_id=self.state.challenge.name,
+        ) as match_sp:
+            try:
+                await self.start()
+                workers = [
+                    asyncio.create_task(self._agent_loop(AgentType.PRISONER, prisoner)),
+                    asyncio.create_task(self._agent_loop(AgentType.WARDEN, warden)),
+                ]
+                stop_waiter = asyncio.create_task(self._stop_event.wait())
+                timeout_waiter = (
+                    asyncio.create_task(asyncio.sleep(timeout_seconds))
+                    if timeout_seconds is not None
+                    else None
+                )
+                wait_for = [*workers, stop_waiter]
+                if timeout_waiter is not None:
+                    wait_for.append(timeout_waiter)
+                done, _ = await asyncio.wait(
+                    wait_for, return_when=asyncio.FIRST_COMPLETED
+                )
+                if timeout_waiter in done:
+                    self.finish(winner=AgentType.WARDEN, end_reason="match timeout")
+                elif stop_waiter not in done:
+                    # A worker ended unexpectedly; raise exception and finish
+                    # the match instead of silently leaving its opponent running.
+                    for worker in done:
+                        worker.result()
+                    self.finish(end_reason="agent action loop ended")
+            finally:
+                for task in [*workers, stop_waiter, timeout_waiter]:
+                    if task is None:
+                        continue
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(
+                    *workers,
+                    *([stop_waiter] if stop_waiter is not None else []),
+                    *([timeout_waiter] if timeout_waiter is not None else []),
+                    return_exceptions=True,
+                )
+                if self.state.status is MatchStatus.RUNNING:
+                    self.finish()
+                await self.sandbox_manager.destroy_sandbox(self.state.match_id)
+                await self._persist_match_finished()
+            set_span_attributes(
+                match_sp,
+                {
+                    "arbiter.status": "finished",
+                    "arbiter.winner": self.state.winner.value
+                    if self.state.winner
+                    else None,
+                    "arbiter.end_reason": self.state.end_reason,
+                },
             )
-            wait_for = [*workers, stop_waiter]
-            if timeout_waiter is not None:
-                wait_for.append(timeout_waiter)
-            done, _ = await asyncio.wait(wait_for, return_when=asyncio.FIRST_COMPLETED)
-            if timeout_waiter in done:
-                self.finish(winner=AgentType.WARDEN, end_reason="match timeout")
-            elif stop_waiter not in done:
-                # A worker ended unexpectedly; raise exception and finish
-                # the match instead of silently leaving its opponent running.
-                for worker in done:
-                    worker.result()
-                self.finish(end_reason="agent action loop ended")
-        finally:
-            for task in [*workers, stop_waiter, timeout_waiter]:
-                if task is None:
-                    continue
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(
-                *workers,
-                *([stop_waiter] if stop_waiter is not None else []),
-                *([timeout_waiter] if timeout_waiter is not None else []),
-                return_exceptions=True,
-            )
-            if self.state.status is MatchStatus.RUNNING:
-                self.finish()
-            await self.sandbox_manager.destroy_sandbox(self.state.match_id)
 
     def finish(
         self, *, winner: AgentType | None = None, end_reason: str | None = None
@@ -366,82 +514,132 @@ class Engine:
             winner=winner.value if winner else None,
             end_reason=end_reason,
         )
-        record_match_event(
-            "match_finished",
-            match_id=self.state.match_id,
-            winner=winner.value if winner else None,
-            end_reason=end_reason,
-        )
 
     async def _agent_loop(self, actor: AgentType, source: AgentActionSource) -> None:
+        """Drive one actor via native deferred tool calling.
+
+        Binds the engine's authoritative executor once, then each iteration
+        is a single native ``agent.run()`` (via ``source.run_turn``) that
+        resolves tool calls inline through the executor.
+        """
+        binder = getattr(source, "bind_tool_executor", None)
+        if binder is not None:
+            binder(
+                lambda tool_name, args: self._execute_deferred_tool(
+                    actor, tool_name, args
+                )
+            )
+        # Provider-level events (rate limits, retries) come from inside the
+        # agent, so it reports them back through the engine's normal match
+        # event path: persisted to match_events and streamed to spectators.
+        reporter = getattr(source, "bind_event_reporter", None)
+        if reporter is not None:
+            reporter(
+                lambda event_type, attributes: self._report_agent_event(
+                    actor, event_type, attributes
+                )
+            )
         while not self._stop_event.is_set():
             if not self.cooldowns.can_act(self.state, actor):
                 await asyncio.sleep(0.05)
                 continue
             scratchpad = await self._read_scratchpad(actor)
-            call = await source.next_tool_call(scratchpad)
-            logger.info(
-                f"ToolCall Request[{actor}]: name={call.name} args={call.arguments}"
-            )
-            logger.info(f"[{actor}] - Executing Tool Call")
-            result = await self.execute_tool_call(actor, call)
-            observe = getattr(source, "observe_result", None)
-            if observe is not None:
-                logger.info(
-                    f"ToolResult[{actor}]: success={result.success}, output={result.output}, error={result.error}, metadata={result.metadata}"
+            try:
+                # Agent identity for observability: covers the LLM call, the
+                # deferred tool calls inside it, and the next model request.
+                with agent_observability_context(agent_role=actor.value):
+                    output = await source.run_turn(scratchpad)
+            except asyncio.CancelledError:
+                raise
+            except AgentUnavailableError as unavailable:
+                winner = (
+                    AgentType.WARDEN
+                    if actor is AgentType.PRISONER
+                    else AgentType.PRISONER
                 )
-                await observe(call, result)
+                end_reason = f"{actor.value} agent not available: {unavailable}"
+                logger.critical(f"[{actor}] {end_reason}")
+                await self._report_agent_event(
+                    actor, "agent_unavailable", {"reason": str(unavailable)}
+                )
+                self.finish(winner=winner, end_reason=end_reason)
+                return
+            except Exception:
+                logger.exception(f"[{actor}] agent turn failed")
+                await asyncio.sleep(1.0)
+                continue
+            if output:
+                event = self._record("agent_message", actor=actor.value, content=output)
+                await self._persist(
+                    "chat",
+                    actor=actor.value,
+                    result={"content": output},
+                    timestamp=event["timestamp"],
+                )
+            if output is None:
+                await asyncio.sleep(1.0)
+
+    async def _execute_deferred_tool(
+        self,
+        actor: AgentType,
+        tool_name: str,
+        args: dict[str, Any] | None,
+    ) -> Any:
+        """Native deferred-tool executor: pace, execute, map.
+
+        Waits for the actor's cooldown (preserving one-action-per-window
+        pacing inside native runs), executes through the authoritative
+        ``execute_tool_call`` path, and maps the engine result to a
+        Pydantic AI tool return value.
+        """
+        while (
+            not self._stop_event.is_set()
+            and self.state.status is MatchStatus.RUNNING
+            and not self.cooldowns.can_act(self.state, actor)
+        ):
+            await asyncio.sleep(0.05)
+        call = ToolCall(name=tool_name, arguments=dict(args or {}))
+        logger.info(
+            f"ToolCall Request[{actor}]: name={call.name} args={call.arguments}"
+        )
+        logger.info(f"[{actor}] - Executing Tool Call")
+        try:
+            result = await self.execute_tool_call(actor, call)
+        except Exception as error:
+            logger.exception(f"[{actor}] tool execution raised")
+            result = ToolResult(success=False, error=f"Tool execution failed: {error}")
+        logger.info(
+            f"ToolResult[{actor}]: success={result.success}, output={result.output}, error={result.error}, metadata={result.metadata}"
+        )
+        return ToolReturn(
+            return_value=result.model_dump(exclude_none=True, exclude={"metadata"})
+        )
 
     def _setup_commands(self) -> list[str]:
         challenge = self.state.challenge
+        warden = shlex.quote(challenge.warden_user)
+        prisoner = shlex.quote(challenge.prisoner_user)
         commands = [
-            f"id -u {shlex.quote(challenge.warden_user)} >/dev/null 2>&1 || useradd -m -s /bin/bash {shlex.quote(challenge.warden_user)}",
-            f"usermod -aG sudo {shlex.quote(challenge.warden_user)}",
-            f"id -u {shlex.quote(challenge.prisoner_user)} >/dev/null 2>&1 || useradd -m -s /bin/bash {shlex.quote(challenge.prisoner_user)}",
+            f"id -u {warden} >/dev/null 2>&1 || useradd -m -s /bin/bash {warden}",
+            f"usermod -aG sudo {warden}",
+            f"id -u {prisoner} >/dev/null 2>&1 || useradd -m -s /bin/bash {prisoner}",
         ]
-        files = {"/root/secret.txt": challenge.flag, **challenge.files}
-        for path, content in files.items():
+        for path, content in challenge.files.items():
+            parent = shlex.quote(str(Path(path).parent))
+            target = shlex.quote(path)
             commands.append(
-                "install -d -m 700 "
-                f"{shlex.quote(str(Path(path).parent))} && "
-                f"printf %s {shlex.quote(content)} > {shlex.quote(path)} && chmod 600 {shlex.quote(path)}"
+                f"mkdir -p {parent} && "
+                f"printf %s {shlex.quote(content)} > {target} && "
+                f"chown {prisoner} {target} && chmod 600 {target}"
             )
+
+        # Everything beyond users/files -- installing packages, starting a
+        # background service, etc. -- is authored as a script and runs as root
+        # once the users and files above exist.
+        if challenge.setup_script:
+            commands.append(challenge.setup_script)
+
         return commands
-
-    @staticmethod
-    def _apply_output_limits(actor: AgentType, result: ToolResult) -> ToolResult:
-        """Enforce the two-tier output policy on a fresh tool result.
-
-        - Above ``UPPER_TOKEN_LIMIT``: ``output`` is redacted immediately
-          (never sent, not even once); guidance goes in ``notice``.
-        - Above ``LOWER_TOKEN_LIMIT``: ``output`` is kept for exactly one
-          turn and a hide-next-turn ``notice`` is attached; the agent hides
-          the field afterwards.
-        - Otherwise: untouched.
-        """
-        token_count = count_tokens(result.output or "")
-        upper = upper_token_limit()
-        if token_count > upper:
-            logger.info(
-                f"[{actor}] tool output ({token_count} tokens > upper limit "
-                f"{upper}): redacted immediately."
-            )
-            return result.model_copy(
-                update={
-                    "output": upper_limit_redaction(token_count, upper),
-                    "notice": upper_limit_notice(token_count, upper),
-                }
-            )
-        lower = lower_token_limit()
-        if token_count > lower:
-            logger.info(
-                f"[{actor}] tool output ({token_count} tokens > lower limit "
-                f"{lower}): kept for one turn with notice."
-            )
-            return result.model_copy(
-                update={"notice": lower_limit_notice(token_count, lower)}
-            )
-        return result
 
     def _sandbox_user(self, actor: AgentType) -> str:
         challenge = self.state.challenge
@@ -477,7 +675,95 @@ class Engine:
     def _agent_state(self, actor: AgentType):
         return self.state.prisoner if actor is AgentType.PRISONER else self.state.warden
 
-    def _record(self, event_type: str, **details: object) -> None:
-        self.state.events.append(
-            {"type": event_type, "timestamp": utc_now(), **details}
+    def _record(self, event_type: str, **details: object) -> dict[str, Any]:
+        event = {"type": event_type, "timestamp": utc_now(), **details}
+        self.state.events.append(event)
+        self._emit(event)
+        return event
+
+    def _match_snapshot(self, **values: Any) -> dict[str, Any]:
+        """Combine the hosted match metadata with the latest lifecycle values."""
+        return {**(self.match_metadata or {}), **values}
+
+    async def _report_agent_event(
+        self, actor: AgentType, event_type: str, attributes: dict[str, Any]
+    ) -> None:
+        """Record one agent/provider event (rate limit, retry, ...).
+
+        Used for events that originate inside the agent rather than the Engine,
+        so they reach both ``match_events`` and the spectator stream like any
+        other match event.
+        """
+        recorded = self._record(event_type, actor=actor.value, **attributes)
+        await self._persist(
+            event_type,
+            actor=actor.value,
+            result=attributes,
+            timestamp=recorded["timestamp"],
         )
+
+    async def _persist(
+        self,
+        event_type: str,
+        *,
+        actor: str = "system",
+        action: dict[str, Any] | None = None,
+        result: dict[str, Any] | None = None,
+        timestamp: datetime | None = None,
+        match: dict[str, Any] | None = None,
+    ) -> None:
+        """Hand one activity to the database.
+
+        Persistence is enabled only for a real hosted match (one constructed
+        with ``match_metadata``), so test/scripted engines stay off the
+        database. ``store_match_activity`` never raises.
+        """
+        if self.match_metadata is None:
+            return
+        await store_match_activity(
+            match_id=self.state.match_id,
+            event_type=event_type,
+            actor=actor,
+            action=action,
+            result=result,
+            timestamp=timestamp or utc_now(),
+            match=match,
+        )
+
+    async def _persist_match_finished(self) -> None:
+        """Close out the persisted ``matches`` row with the final outcome."""
+        finished_at = self.state.ended_at or utc_now()
+        started_at = self.state.started_at
+        duration_seconds = (
+            (finished_at - started_at).total_seconds() if started_at else None
+        )
+        winner = self.state.winner.value if self.state.winner else None
+        await self._persist(
+            "match_finished",
+            result={"winner": winner, "end_reason": self.state.end_reason},
+            timestamp=finished_at,
+            match=self._match_snapshot(
+                status=(
+                    "completed"
+                    if self.state.status is MatchStatus.FINISHED
+                    else "failed"
+                ),
+                winner=winner,
+                duration_seconds=duration_seconds,
+                started_at=started_at,
+                finished_at=finished_at,
+            ),
+        )
+
+    def _emit(self, event: dict[str, Any]) -> None:
+        """Hand one event to the optional live sink.
+
+        Best-effort by design: event delivery is a side channel for
+        spectators and must never affect match execution.
+        """
+        if self.event_sink is None:
+            return
+        try:
+            self.event_sink(dict(event))
+        except Exception:
+            logger.exception("Match event sink failed")

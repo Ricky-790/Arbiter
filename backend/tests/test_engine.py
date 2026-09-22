@@ -27,6 +27,15 @@ class FakeSandboxManager:
     async def run_command(self, **kwargs: object) -> ToolResult:
         return await self._record("run_command", **kwargs)
 
+    async def read_file(self, **kwargs: object) -> ToolResult:
+        return await self._record("read_file", **kwargs)
+
+    async def write_file(self, **kwargs: object) -> ToolResult:
+        return await self._record("write_file", **kwargs)
+
+    async def write_to_scratchpad(self, **kwargs: object) -> ToolResult:
+        return await self._record("write_to_scratchpad", **kwargs)
+
     async def watch_file(self, **kwargs: object) -> ToolResult:
         return await self._record("watch_file", **kwargs)
 
@@ -48,7 +57,13 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         manager = FakeSandboxManager()
         engine = Engine(
             match_id="match-1",
-            challenge=ChallengeSpec(name="test", description="test", flag="ARB{flag}"),
+            challenge=ChallengeSpec(
+                name="test",
+                description="test",
+                flag={"value": "ARB{flag}"},
+                flag_structure={"value": "str"},
+                files={"/root/secret.txt": "ARB{flag}"},
+            ),
             sandbox_manager=manager,
         )
         return engine, manager
@@ -65,6 +80,31 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("useradd" in command and "warden" in command for command in commands))
         self.assertTrue(any("usermod -aG sudo warden" in command for command in commands))
         self.assertTrue(any("/root/secret.txt" in command and "ARB{flag}" in command for command in commands))
+
+    def test_setup_commands_own_files_and_run_setup_script(self) -> None:
+        engine = Engine(
+            match_id="setup-1",
+            challenge=ChallengeSpec(
+                name="t",
+                description="t",
+                flag={"value": "s"},
+                flag_structure={"value": "str"},
+                files={"/challenge/hidden/.secret": "s"},
+                setup_script="nohup /tmp/service.sh &",
+            ),
+            sandbox_manager=FakeSandboxManager(),  # type: ignore[arg-type]
+        )
+
+        commands = engine._setup_commands()
+
+        self.assertTrue(any("useradd" in c and "warden" in c for c in commands))
+        self.assertEqual(commands[-1], "nohup /tmp/service.sh &")
+
+        file_commands = [c for c in commands if "/challenge/hidden/.secret" in c]
+        self.assertEqual(len(file_commands), 1)
+        self.assertIn("mkdir -p /challenge/hidden", file_commands[0])
+        self.assertIn("chown prisoner /challenge/hidden/.secret", file_commands[0])
+        self.assertIn("chmod 600 /challenge/hidden/.secret", file_commands[0])
 
     async def test_tool_cost_and_cooldown_are_centrally_enforced(self) -> None:
         engine, manager = self.make_engine()
@@ -111,16 +151,39 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(rearm.success)
         self.assertIn("cannot be re-armed", rearm.error or "")
         self.assertTrue(reaction.success)
-
     async def test_engine_evaluates_flag_submission_and_finishes_match(self) -> None:
         engine, _ = self.make_engine()
         await engine.start()
 
         result = await engine.execute_tool_call(
             AgentType.PRISONER,
-            ToolCall(name="submit_flag", arguments={"flag": "ARB{flag}"}),
+            ToolCall(
+                name="submit_flag",
+                arguments={"response": {"value": "ARB{flag}"}},
+            ),
         )
 
         self.assertTrue(result.success)
         self.assertEqual(engine.state.status, MatchStatus.FINISHED)
         self.assertEqual(engine.state.winner, AgentType.PRISONER)
+
+    async def test_free_tools_skip_credits_and_cooldown(self) -> None:
+        engine, _ = self.make_engine()
+        await engine.start()
+
+        read = await engine.execute_tool_call(
+            AgentType.PRISONER, ToolCall(name="read_file", arguments={"path": "a.txt"})
+        )
+        scratch = await engine.execute_tool_call(
+            AgentType.PRISONER,
+            ToolCall(name="write_to_scratchpad", arguments={"content": "note"}),
+        )
+        # A charged action immediately after is not cooldown-rejected.
+        bash = await engine.execute_tool_call(
+            AgentType.PRISONER, ToolCall(name="bash", arguments={"command": "id"})
+        )
+
+        self.assertTrue(read.success)
+        self.assertTrue(scratch.success)
+        self.assertTrue(bash.success)
+        self.assertEqual(engine.state.prisoner.credits, 48)

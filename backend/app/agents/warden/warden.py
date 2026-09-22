@@ -9,7 +9,7 @@ from .instructions import WARDEN_INSTRUCTIONS
 class WardenAgent(ToolChoosingAgent):
     def __init__(
         self,
-        model_name: str = "gemini-3.1-flash-lite",
+        model_name: str = "google/gemini-3.1-flash-lite",
         *,
         objective: str | None = None,
         scripted_calls: Iterable[ToolCall] | None = None,

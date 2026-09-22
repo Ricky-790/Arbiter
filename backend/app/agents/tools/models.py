@@ -23,16 +23,14 @@ class ToolCost(IntEnum):
 
 
 class ToolCall(BaseModel):
-    """An agent's requested capability and LLM-controlled arguments."""
+    """An agent's requested capability and LLM-controlled arguments.
+
+    This is the Engine-internal representation of a native Pydantic AI tool
+    call -- the model never produces it directly.
+    """
 
     name: str
     arguments: dict[str, Any] = Field(default_factory=dict)
-    reason: str = Field(
-        default="",
-        description=(
-            "Detailed reasoning behind this decision: what you observed in recent tool results and scratchpad, why you chose this tool, why these arguments, and what you expect to learn. Always explain your thinking here; it is shown back to you next turn."
-        ),
-    )
 
 
 class ToolResult(BaseModel):
@@ -46,7 +44,7 @@ class ToolResult(BaseModel):
     notice: str | None = Field(
         default=None,
         description=(
-            "Optional guidance attached when the output exceeded token "
-            "limits (e.g. it will be hidden next turn)."
+            "Optional guidance attached when the output is long (e.g. a "
+            "suggestion to use the scratchpad and narrower commands)."
         ),
     )

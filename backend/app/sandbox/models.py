@@ -81,12 +81,26 @@ class ChallengeSpec(BaseModel):
     prisoner_user: str = "prisoner"
     warden_user: str = "warden"
 
-    # Secret/flag that the challenge is built around.
-    flag: str
+    # Expected flag output. Its shape is described by ``flag_structure``;
+    # an empty dict means the challenge declares no expected output value.
+    flag: dict[str, Any] = Field(default_factory=dict)
+
+    # Field name -> type name (e.g. ``{"value": "str"}``) describing what a
+    # valid agent submission looks like. Empty means "no shape constraint".
+    flag_structure: dict[str, str] = Field(default_factory=dict)
+
+    # Optional script run inside the sandbox to verify a submission. It must
+    # print a JSON verdict (``{"success": bool, "reason": str}``) to stdout.
+    verifier_script: str | None = None
 
     # Files/directories that should exist when the challenge starts.
     # path -> content (text files only for now)
     files: dict[str, str] = Field(default_factory=dict)
+
+    # Optional shell commands for everything beyond users and files:
+    # installing packages, starting long-running processes, etc. Runs as root
+    # after the users and files above exist.
+    setup_script: str | None = None
 
     # Optional environment variables exported by default inside the sandbox.
     environment: dict[str, str] = Field(default_factory=dict)

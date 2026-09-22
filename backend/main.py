@@ -1,8 +1,24 @@
-"""Arbiter backend entry point."""
+import json
+import os
 
-from app.observability import configure_observability
+from dotenv import load_dotenv
 
-# Configure observability first, before any instrumented code runs.
-# Requires the `logfire` package (`uv sync`) and authentication
-# (`logfire auth`); degrades to local-only logging until then.
-configure_observability()
+load_dotenv()
+import logfire.db_api
+
+conn = logfire.db_api.connect(read_token=os.getenv("READ_TOKEN", ""))
+cursor = conn.cursor()
+cursor.execute("""SELECT
+    start_timestamp,
+    duration AS latency_seconds,
+    span_name,
+    trace_id,
+    attributes
+FROM records
+WHERE attributes->>'arbiter.match_id' = '381726bf-c40a-49a6-87ea-78be286104ca'
+ORDER BY start_timestamp ASC;""")
+rows = cursor.fetchall()
+with open("a.json", "w") as f:
+    f.write(json.dumps(rows, indent=2))
+    f.close()
+conn.close()

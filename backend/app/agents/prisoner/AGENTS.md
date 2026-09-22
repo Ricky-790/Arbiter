@@ -2,31 +2,59 @@
 
 ## Role
 
-The Prisoner is the offensive agent. Its objective is to accomplish the challenge goal before the match ends.
+The Prisoner is the offensive agent.
 
-For the current V1 challenge, this means discovering the secret and submitting the correct flag.
+Its objective is to complete the current challenge before the match ends.
+
+For V1 read-secret, it must discover the secret and submit the correct flag.
 
 ## Implementation
 
-`PrisonerAgent` extends `ToolChoosingAgent`.
+`PrisonerAgent` is a thin specialization of the common agent runtime.
 
-The role-specific configuration currently controls:
+It configures:
 
-- model name
-- instructions
+- model
+- role instructions
 - objective
-- scripted calls for tests
 - allowed tools
+- optional scripted calls for tests
 
-The current allowed tool set is intentionally narrow. Check `prisoner.py` rather than assuming every registered tool is available.
+The common Pydantic AI/deferred-tool runtime belongs in `agents/base.py`.
+
+Do not create a separate agent loop here.
+
+## Tool interaction
+
+The Prisoner receives native tool definitions and requests actions through normal Pydantic AI tool calls.
+
+It does not directly call:
+
+- `SandboxManager`
+- Solari
+- Engine methods
+
+The Engine remains authoritative for whether a requested action is allowed.
+
+## Scratchpad
+
+The scratchpad is voluntary persistent agent memory.
+
+The Prisoner may use:
+
+```text
+write_to_scratchpad(content)
+```
+
+when it decides a discovery, plan, or other information is worth preserving.
+
+Do not force scratchpad usage.
 
 ## Rules
 
-- Do not put match/game logic here.
-- Do not directly call Solari.
-- Do not directly access `SandboxManager`.
-- Request actions through `ToolCall`.
-- Treat tool results as observations, not as authoritative match state.
-- Do not add hidden shared state between Prisoner and Warden.
-
-If adding persistent memory, use the dedicated scratchpad capability rather than inventing another history mechanism.
+- Do not put match/game rules here.
+- Do not determine the winner.
+- Do not trust model claims of success.
+- Do not receive Warden private reasoning.
+- Do not create shared state with Warden.
+- Do not capture hidden chain-of-thought.

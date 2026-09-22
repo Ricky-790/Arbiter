@@ -4,10 +4,9 @@ import shlex
 from collections.abc import Awaitable, Callable
 from pathlib import Path, PurePosixPath
 
-from solari_core import CodeLanguage
+from solari_core import CodeLanguage, ConcurrencyLimitError
 from solari_sandbox import Sandbox
 
-from app import sandbox
 from app.agents.tools.models import ToolResult
 from app.logger import get_logger
 
@@ -51,12 +50,25 @@ class SandboxManager:
 
     async def get_or_create_sandbox(
         self, match_id: str, config: SandboxConfig | None = None
-    ) -> Sandbox:
+    ):
         """Return the match sandbox, creating it exactly once when absent."""
         existing = self.sandboxes.get(match_id)
         if existing is not None:
             return existing
-        return await self.create_new_sandbox(match_id, config)
+        for attempt in range(3):
+            try:
+                sbx = await self.create_new_sandbox(
+                    match_id=match_id, config=config or SandboxConfig()
+                )
+                # self.sandboxes[match_id] = sbx
+                return sbx
+            except ConcurrencyLimitError as e:
+                logger.fatal(
+                    f"Concurrency limit error (attempt {attempt + 1}/3), retrying after 30s..."
+                )
+                if attempt == 2:  # Last attempt failed, re-raise or handle accordingly
+                    raise ConcurrencyLimitError("Failed to create a sandbox instance")
+                await asyncio.sleep(30)
 
     async def get_sandbox(self, match_id: str) -> Sandbox:
         try:
@@ -222,7 +234,7 @@ class SandboxManager:
             raise ValueError("Cannont contain `~`")
         if path.startswith("/"):
             path = path.removeprefix("/")
-        return f"/home/{user}/{path}"
+        return path
 
     @staticmethod
     def _tool_result(result: CommandResult) -> ToolResult:
