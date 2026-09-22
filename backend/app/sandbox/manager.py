@@ -234,7 +234,7 @@ class SandboxManager:
             raise ValueError("Cannont contain `~`")
         if path.startswith("/"):
             path = path.removeprefix("/")
-        return f"/home/{user}/{path}"
+        return path
 
     @staticmethod
     def _tool_result(result: CommandResult) -> ToolResult:

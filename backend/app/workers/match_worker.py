@@ -17,12 +17,14 @@ from uuid import UUID
 
 from dotenv import load_dotenv
 
+from app.agents.agents_directory import split_model_name
 from app.agents.prisoner import PrisonerAgent
 from app.agents.warden import WardenAgent
 from app.broker.events import MatchEventPublisher
 from app.broker.models import MatchStartMessage
 from app.db import get_engine, get_session_factory, reset_session_state
 from app.db.models import Challenge
+from app.db.services import matches_service
 from app.engine import Engine
 from app.logger import get_logger
 from app.sandbox.manager import SandboxManager, sandbox_manager
@@ -54,6 +56,11 @@ async def run_match(message: MatchStartMessage) -> dict[str, Any]:
         spec = await load_challenge_spec(message.challenge_id)
         timeout_seconds = message.timeout_seconds or default_timeout_seconds()
 
+        # The API created the row with status "queued"; taking it off the queue
+        # is what makes it "running". The Engine finishes the lifecycle later
+        # (completed/failed) on the same row.
+        await mark_match_running(message.match_id)
+
         prisoner = PrisonerAgent(
             model_name=message.prisoner_model,
             objective=prisoner_objective(spec),
@@ -63,6 +70,8 @@ async def run_match(message: MatchStartMessage) -> dict[str, Any]:
             objective=warden_objective(spec),
         )
 
+        match_metadata = build_match_metadata(message, spec)
+
         # The publisher lives for the whole match so the final
         # `match_finished` event is flushed before the task returns.
         async with MatchEventPublisher(str(message.match_id)) as publish:
@@ -71,6 +80,7 @@ async def run_match(message: MatchStartMessage) -> dict[str, Any]:
                 challenge=spec,
                 sandbox_manager=sandbox_manager,
                 event_sink=publish,
+                match_metadata=match_metadata,
             )
             logger.info(f"Starting match {message.match_id}")
             await engine.run_agents(prisoner, warden, timeout_seconds=timeout_seconds)
@@ -94,6 +104,33 @@ async def load_challenge_spec(challenge_id: UUID) -> ChallengeSpec:
         if challenge is None:
             raise ValueError(f"Challenge {challenge_id} does not exist")
         return build_challenge_spec(challenge)
+
+
+async def mark_match_running(match_id: UUID) -> None:
+    """Move the API-created match row from ``queued`` to ``running``.
+
+    The row itself is created by ``POST /matches/start-match``; from here on
+    the worker and Engine only update it.
+    """
+    factory = get_session_factory()
+    async with factory() as session:
+        await matches_service.set_status(session, match_id, "running")
+
+
+def build_match_metadata(
+    message: MatchStartMessage, spec: ChallengeSpec
+) -> dict[str, Any]:
+    """Build the parent ``matches`` row snapshot the Engine persists"""
+    prisoner_provider, prisoner_model = split_model_name(message.prisoner_model)
+    warden_provider, warden_model = split_model_name(message.warden_model)
+    return {
+        "challenge_id": message.challenge_id,
+        "prisoner_model": prisoner_model,
+        "prisoner_provider": prisoner_provider,
+        "warden_model": warden_model,
+        "warden_provider": warden_provider,
+        "win_condition": spec.win_condition,
+    }
 
 
 def build_challenge_spec(challenge: Challenge) -> ChallengeSpec:

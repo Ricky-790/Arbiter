@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, String
+from sqlalchemy import DateTime, ForeignKey, Index, String
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -14,9 +14,19 @@ from .base import Base
 #: Allowed ``actor`` values (plain VARCHAR until a stricter type is asked for).
 EVENT_ACTORS = ("prisoner", "warden", "system")
 
-#: Initial ``event_type`` values; more may be added later without migration pain
-#: because the column is plain VARCHAR.
-EVENT_TYPES = ("chat", "tool_call")
+#: Recorded ``event_type`` values; more may be added later without migration
+#: pain because the column is plain VARCHAR.
+EVENT_TYPES = (
+    "chat",
+    "tool_call",
+    "sandbox_event",
+    "match_started",
+    "match_finished",
+    "trap_triggered",
+    "agent_retry",
+    "agent_error",
+    "agent_unavailable",
+)
 
 
 class MatchEvent(Base):
@@ -45,10 +55,6 @@ class MatchEvent(Base):
     )
     action: Mapped[dict] = mapped_column(JSONB, nullable=False)
     result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
     timestamp: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

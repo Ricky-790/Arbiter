@@ -38,8 +38,8 @@ class SolariClient:
         return sbx
 
     async def kill(self, sbx: Sandbox) -> None:
-        pass
-        # await sbx.kill()
+        # pass
+        await sbx.kill()
 
     async def exec_command(
         self, sbx: Sandbox, *, command: str, user: str | None = None

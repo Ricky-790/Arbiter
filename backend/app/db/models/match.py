@@ -13,6 +13,7 @@ from .base import Base
 
 #: Allowed ``status`` values (plain VARCHAR until a stricter type is asked for).
 MATCH_STATUSES = (
+    "queued",
     "pending",
     "starting",
     "running",

@@ -14,6 +14,15 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict
 
 
+class PaginationMeta(BaseModel):
+    """Common paging envelope for list endpoints."""
+
+    page: int
+    page_size: int
+    total: int
+    pages: int
+
+
 class ChallengeSummary(BaseModel):
     """List view: id, name, description and win condition only."""
 
@@ -76,13 +85,27 @@ class MatchEventSchema(BaseModel):
     event_type: str
     action: dict[str, Any]
     result: dict[str, Any] | None
-    input_tokens: int | None
-    output_tokens: int | None
-    total_tokens: int | None
-    latency_ms: float | None
     timestamp: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class MatchListSchema(MatchSchema):
+    """A match row plus the joined challenge name (archive list view)."""
+
+    challenge_name: str | None = None
+
+
+class MatchListResponse(PaginationMeta):
+    """One page of matches, sorted by date."""
+
+    items: list[MatchListSchema]
+
+
+class MatchEventListResponse(PaginationMeta):
+    """One page of a single match's events, sorted by date."""
+
+    items: list[MatchEventSchema]
 
 
 class StartMatchRequest(BaseModel):

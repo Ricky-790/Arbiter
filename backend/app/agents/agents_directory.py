@@ -57,6 +57,19 @@ agent_mapper = {
     "nvidia/deepseek-v4-flash-0731": deepseek_v4_flash,
 }
 
+
+def split_model_name(model_name: str) -> tuple[str, str]:
+    """Split a ``provider/model`` key into ``(provider, model)``.
+
+    The ``matches`` table stores the provider and model in separate columns,
+    while the API and queue carry the combined ``provider/model`` key.
+    """
+    provider, separator, model = model_name.partition("/")
+    if not separator:
+        return "unknown", model_name
+    return provider, model
+
+
 # agent = Agent(gemini_3_6, output_type=str)
 # result = agent.run_sync("Whats 2+2")
 # print(result.output)

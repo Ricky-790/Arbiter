@@ -4,7 +4,7 @@ import asyncio
 import json
 import shlex
 from collections.abc import Awaitable, Callable
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -14,6 +14,7 @@ from app.agents.base import AgentUnavailableError
 from app.agents.models import AgentType
 from app.agents.tools import ToolCall, ToolExecutionContext, ToolRegistry, ToolResult
 from app.agents.tools.registry import build_default_registry
+from app.db.match_log import store_match_activity
 from app.logger import get_logger
 from app.observability import (
     agent_observability_context,
@@ -151,8 +152,7 @@ class EngineExecutionContext(ToolExecutionContext):
         return ToolResult(
             success=False,
             error=(
-                "Incorrect submission. Review the expected structure and try "
-                "again."
+                "Incorrect submission. Review the expected structure and try again."
             ),
         )
 
@@ -172,6 +172,7 @@ class Engine:
         registry: ToolRegistry | None = None,
         cooldown_seconds: float = 5.0,
         event_sink: Callable[[dict[str, Any]], None] | None = None,
+        match_metadata: dict[str, Any] | None = None,
     ) -> None:
         self.state = MatchState(match_id=match_id, challenge=challenge)
         self.sandbox_manager = sandbox_manager
@@ -179,9 +180,8 @@ class Engine:
         self.credits = CreditManager()
         self.cooldowns = CooldownManager(timedelta(seconds=cooldown_seconds))
         self.traps = TrapManager()
-        # Optional live event transport (e.g. Redis pub/sub for spectators).
-        # Called synchronously from `_record`; must never block or raise.
         self.event_sink = event_sink
+        self.match_metadata = match_metadata
         self._action_lock = asyncio.Lock()
         self._stop_event = asyncio.Event()
         logger.info("Game engine instance initialized")
@@ -210,12 +210,18 @@ class Engine:
                 )
         self.state.status = MatchStatus.RUNNING
         self.state.started_at = utc_now()
-        self._record("match_started")
+        event = self._record("match_started")
+        await self._persist(
+            "match_started",
+            action={"challenge": self.state.challenge.name},
+            timestamp=event["timestamp"],
+            match=self._match_snapshot(
+                status="running", started_at=self.state.started_at
+            ),
+        )
         logger.info("Match is running")
 
-    async def run_verifier_script(
-        self, submission: dict[str, Any]
-    ) -> tuple[bool, str]:
+    async def run_verifier_script(self, submission: dict[str, Any]) -> tuple[bool, str]:
         """Run the challenge's in-sandbox verifier and interpret its verdict.
 
         The submitted answer is exposed to the script both as the
@@ -247,17 +253,46 @@ class Engine:
 
         The tool span opens as soon as the request is received, so every
         outcome -- executed, rejected, or failed -- lands on that one span.
+        Every outcome is also persisted: the requested tool plus its arguments
+        go into ``action``, the outcome into ``result``.
         """
-        async with (
-            self._action_lock  # Makes sure only one async task can access a shared resource
-        ):
-            with tool_execution_span(
-                match_id=self.state.match_id,
-                agent_role=actor.value,
-                tool_name=call.name,
-                tool_args=call.arguments,
-            ) as span:
-                return await self._execute_tool_call_tracked(actor, call, span)
+        action = {"tool": call.name, "arguments": call.arguments}
+        try:
+            async with (
+                self._action_lock  # Makes sure only one async task can access a shared resource
+            ):
+                with tool_execution_span(
+                    match_id=self.state.match_id,
+                    agent_role=actor.value,
+                    tool_name=call.name,
+                    tool_args=call.arguments,
+                ) as span:
+                    result = await self._execute_tool_call_tracked(actor, call, span)
+        except Exception as error:
+            # A crashed tool call is still part of the match history.
+            await self._persist(
+                "tool_call",
+                actor=actor.value,
+                action=action,
+                result={
+                    "success": False,
+                    "exit_code": None,
+                    "error": f"Tool execution failed: {error}",
+                },
+            )
+            raise
+        # One persisted row per requested tool call, whatever the outcome.
+        await self._persist(
+            "tool_call",
+            actor=actor.value,
+            action=action,
+            result={
+                "success": result.success,
+                "exit_code": result.exit_code,
+                "error": result.error,
+            },
+        )
+        return result
 
     async def _execute_tool_call_tracked(
         self, actor: AgentType, call: ToolCall, span: Any | None
@@ -342,7 +377,13 @@ class Engine:
         )
         self._agent_state(actor).last_result = result
         self._record(
-            "tool_result", actor=actor.value, tool=call.name, success=result.success
+            "tool_result",
+            actor=actor.value,
+            tool=call.name,
+            arguments=call.arguments,
+            success=result.success,
+            exit_code=result.exit_code,
+            error=result.error,
         )
 
         if actor is AgentType.WARDEN and result.success:
@@ -353,15 +394,25 @@ class Engine:
         return result
 
     async def handle_sandbox_event(self, event: SandboxEvent) -> bool:
-        """Open the Warden reaction window if the active trap matches an event."""
+        """Persist one sandbox observation and react to it if a trap matches"""
         async with self._action_lock:
-            if self.state.status is not MatchStatus.RUNNING or not self.traps.matches(
-                self.state, event
-            ):
+            if self.state.status is not MatchStatus.RUNNING:
+                return False
+            matched = self.traps.matches(self.state, event)
+            await self._persist(
+                "sandbox_event",
+                actor=event.user or "system",
+                action=event.model_dump(
+                    mode="json", exclude={"timestamp"}, exclude_none=True
+                ),
+                result={"matched_trap": matched},
+                timestamp=event.timestamp,
+            )
+            if not matched:
                 return False
             trap = self.traps.trigger(self.state)
             reaction_until = self.cooldowns.open_warden_reaction(self.state)
-            self._record(
+            recorded = self._record(
                 "trap_triggered",
                 trap=trap.tool_name if trap else None,
                 reaction_until=reaction_until.isoformat(),
@@ -370,6 +421,11 @@ class Engine:
                 "trap_triggered",
                 match_id=self.state.match_id,
                 trap=trap.tool_name if trap else None,
+            )
+            await self._persist(
+                "trap_triggered",
+                result={"trap": trap.tool_name if trap else None},
+                timestamp=recorded["timestamp"],
             )
             return True
 
@@ -431,6 +487,7 @@ class Engine:
                 if self.state.status is MatchStatus.RUNNING:
                     self.finish()
                 await self.sandbox_manager.destroy_sandbox(self.state.match_id)
+                await self._persist_match_finished()
             set_span_attributes(
                 match_sp,
                 {
@@ -472,6 +529,16 @@ class Engine:
                     actor, tool_name, args
                 )
             )
+        # Provider-level events (rate limits, retries) come from inside the
+        # agent, so it reports them back through the engine's normal match
+        # event path: persisted to match_events and streamed to spectators.
+        reporter = getattr(source, "bind_event_reporter", None)
+        if reporter is not None:
+            reporter(
+                lambda event_type, attributes: self._report_agent_event(
+                    actor, event_type, attributes
+                )
+            )
         while not self._stop_event.is_set():
             if not self.cooldowns.can_act(self.state, actor):
                 await asyncio.sleep(0.05)
@@ -492,6 +559,9 @@ class Engine:
                 )
                 end_reason = f"{actor.value} agent not available: {unavailable}"
                 logger.critical(f"[{actor}] {end_reason}")
+                await self._report_agent_event(
+                    actor, "agent_unavailable", {"reason": str(unavailable)}
+                )
                 self.finish(winner=winner, end_reason=end_reason)
                 return
             except Exception:
@@ -499,8 +569,12 @@ class Engine:
                 await asyncio.sleep(1.0)
                 continue
             if output:
-                self._record(
-                    "agent_message", actor=actor.value, content=output
+                event = self._record("agent_message", actor=actor.value, content=output)
+                await self._persist(
+                    "chat",
+                    actor=actor.value,
+                    result={"content": output},
+                    timestamp=event["timestamp"],
                 )
             if output is None:
                 await asyncio.sleep(1.0)
@@ -550,12 +624,6 @@ class Engine:
             f"usermod -aG sudo {warden}",
             f"id -u {prisoner} >/dev/null 2>&1 || useradd -m -s /bin/bash {prisoner}",
         ]
-
-        # Challenge files are the game board: the Prisoner must be able to
-        # read and modify them for the challenge to be playable, so each file
-        # is owned by the Prisoner account with 600. Warden privilege is
-        # sandbox-local (sudo), so it can still inspect or restore them.
-        # `mkdir -p` leaves existing system directories such as /tmp untouched.
         for path, content in challenge.files.items():
             parent = shlex.quote(str(Path(path).parent))
             target = shlex.quote(path)
@@ -607,10 +675,85 @@ class Engine:
     def _agent_state(self, actor: AgentType):
         return self.state.prisoner if actor is AgentType.PRISONER else self.state.warden
 
-    def _record(self, event_type: str, **details: object) -> None:
+    def _record(self, event_type: str, **details: object) -> dict[str, Any]:
         event = {"type": event_type, "timestamp": utc_now(), **details}
         self.state.events.append(event)
         self._emit(event)
+        return event
+
+    def _match_snapshot(self, **values: Any) -> dict[str, Any]:
+        """Combine the hosted match metadata with the latest lifecycle values."""
+        return {**(self.match_metadata or {}), **values}
+
+    async def _report_agent_event(
+        self, actor: AgentType, event_type: str, attributes: dict[str, Any]
+    ) -> None:
+        """Record one agent/provider event (rate limit, retry, ...).
+
+        Used for events that originate inside the agent rather than the Engine,
+        so they reach both ``match_events`` and the spectator stream like any
+        other match event.
+        """
+        recorded = self._record(event_type, actor=actor.value, **attributes)
+        await self._persist(
+            event_type,
+            actor=actor.value,
+            result=attributes,
+            timestamp=recorded["timestamp"],
+        )
+
+    async def _persist(
+        self,
+        event_type: str,
+        *,
+        actor: str = "system",
+        action: dict[str, Any] | None = None,
+        result: dict[str, Any] | None = None,
+        timestamp: datetime | None = None,
+        match: dict[str, Any] | None = None,
+    ) -> None:
+        """Hand one activity to the database.
+
+        Persistence is enabled only for a real hosted match (one constructed
+        with ``match_metadata``), so test/scripted engines stay off the
+        database. ``store_match_activity`` never raises.
+        """
+        if self.match_metadata is None:
+            return
+        await store_match_activity(
+            match_id=self.state.match_id,
+            event_type=event_type,
+            actor=actor,
+            action=action,
+            result=result,
+            timestamp=timestamp or utc_now(),
+            match=match,
+        )
+
+    async def _persist_match_finished(self) -> None:
+        """Close out the persisted ``matches`` row with the final outcome."""
+        finished_at = self.state.ended_at or utc_now()
+        started_at = self.state.started_at
+        duration_seconds = (
+            (finished_at - started_at).total_seconds() if started_at else None
+        )
+        winner = self.state.winner.value if self.state.winner else None
+        await self._persist(
+            "match_finished",
+            result={"winner": winner, "end_reason": self.state.end_reason},
+            timestamp=finished_at,
+            match=self._match_snapshot(
+                status=(
+                    "completed"
+                    if self.state.status is MatchStatus.FINISHED
+                    else "failed"
+                ),
+                winner=winner,
+                duration_seconds=duration_seconds,
+                started_at=started_at,
+                finished_at=finished_at,
+            ),
+        )
 
     def _emit(self, event: dict[str, Any]) -> None:
         """Hand one event to the optional live sink.

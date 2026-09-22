@@ -63,3 +63,22 @@ Note: the spectator route is `POST` as specified, so the browser `EventSource`
 API cannot be used directly — consume it with `fetch()` and a `ReadableStream`,
 or a small SSE client that supports POST. Subscribers only receive events
 published after they subscribe (Redis pub/sub has no replay).
+
+## Match archive
+
+Both list endpoints are paginated (`page`, `page_size`, default 20 / max 100)
+and sorted by date (`sort=date_desc` or `date_asc`).
+
+```bash
+# One page of matches, newest first (default).
+curl "http://localhost:8000/api/v1/matches/?page=1&page_size=20&sort=date_desc"
+
+# One match's persisted events, oldest first (default).
+curl "http://localhost:8000/api/v1/matches/events?match_id=<uuid>&page=1"
+
+# Probe a match's event count without pulling every event.
+curl "http://localhost:8000/api/v1/matches/events?match_id=<uuid>&page_size=1"
+```
+
+Responses are `{items, page, page_size, total, pages}`.
+

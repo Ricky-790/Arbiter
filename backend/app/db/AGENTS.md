@@ -70,6 +70,7 @@ Stores one Prisoner-vs-Warden match.
 ### `status` values
 
 ```text
+queued
 pending
 starting
 running
@@ -77,6 +78,10 @@ completed
 failed
 cancelled
 ```
+
+A match row is created by `POST /api/v1/matches/start-match` with status
+`queued`, moved to `running` by the worker when it picks the job up, and closed
+out as `completed` or `failed` by the Engine — always the same row.
 
 ### `winner` values
 
@@ -113,10 +118,6 @@ Stores the persistent history of match actions and events.
 | `event_type`    | `VARCHAR` / Enum           | Not null                    |
 | `action`        | `JSONB`                    | Not null                    |
 | `result`        | `JSONB`                    | Nullable                    |
-| `input_tokens`  | `INTEGER`                  | Nullable                    |
-| `output_tokens` | `INTEGER`                  | Nullable                    |
-| `total_tokens`  | `INTEGER`                  | Nullable                    |
-| `latency_ms`    | `FLOAT`                    | Nullable                    |
 | `timestamp`     | `TIMESTAMP WITH TIME ZONE` | Not null                    |
 
 ### `actor` values
@@ -134,11 +135,20 @@ Initial values:
 ```text
 chat
 tool_call
+sandbox_event
+match_started
+match_finished
+trap_triggered
+agent_retry
+agent_error
+agent_unavailable
 ```
 
 The schema should allow additional event types to be added later.
 
 `action` and `result` use JSONB because chat and tool-call payloads have different structures.
+
+Token counts and latency are provider telemetry and stay in Logfire; they are not stored in `match_events`.
 
 ### Indexes
 

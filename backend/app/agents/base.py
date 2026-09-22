@@ -158,6 +158,13 @@ class ToolChoosingAgent:
             None
         )
 
+        # Bound by the Engine so retryable provider failures (rate limits,
+        # 503/504) reach the match log and the spectator stream. Best-effort:
+        # reporting must never break a turn.
+        self._event_reporter: (
+            Callable[[str, dict[str, Any]], Awaitable[None]] | None
+        ) = None
+
         self._agent = Agent(
             model,
             output_type=[str, DeferredToolRequests],
@@ -181,6 +188,22 @@ class ToolChoosingAgent:
     ) -> None:
         """Bind the engine's authoritative tool executor for this match."""
         self._tool_executor = executor
+
+    def bind_event_reporter(
+        self,
+        reporter: Callable[[str, dict[str, Any]], Awaitable[None]],
+    ) -> None:
+        """Bind the engine's match-event reporter for provider-level events."""
+        self._event_reporter = reporter
+
+    async def _report_event(self, event_type: str, **attributes: Any) -> None:
+        """Report one provider event without ever breaking the turn."""
+        if self._event_reporter is None:
+            return
+        try:
+            await self._event_reporter(event_type, attributes)
+        except Exception:
+            logger.exception("Agent event reporter failed")
 
     async def _handle_deferred_tools(
         self, ctx: RunContext, requests: DeferredToolRequests
@@ -232,7 +255,7 @@ class ToolChoosingAgent:
         prompt += f"\nYour scratchpad:\n<scratchpad>{scratchpad}</scratchpad>"
         max_retries = 3
         last_status: int | None = None
-        for _ in range(max_retries):
+        for attempt in range(1, max_retries + 1):
             try:
                 result = await self._agent.run(
                     prompt, message_history=self._message_history
@@ -248,18 +271,49 @@ class ToolChoosingAgent:
                         sleep_time = float(raw_wait)
                     except (ValueError, TypeError):
                         sleep_time = 30.0
+                    await self._report_event(
+                        "agent_retry",
+                        reason="rate_limit",
+                        status=status,
+                        attempt=attempt,
+                        max_attempts=max_retries,
+                        wait_seconds=sleep_time,
+                    )
                     await asyncio.sleep(sleep_time)
                     continue
                 if status in (503, 504):
                     last_status = status
                     logger.critical(f"Model temporarily unavailable ({status}): {e}")
+                    await self._report_event(
+                        "agent_retry",
+                        reason="model_unavailable",
+                        status=status,
+                        attempt=attempt,
+                        max_attempts=max_retries,
+                        wait_seconds=30.0,
+                    )
                     await asyncio.sleep(30.0)
                     continue
                 logger.error(f"Model HTTP error: {e}")
+                await self._report_event(
+                    "agent_error",
+                    reason="model_http_error",
+                    status=status,
+                    attempt=attempt,
+                    max_attempts=max_retries,
+                    detail=str(e),
+                )
                 self._record_failure()
                 return None
             except Exception as e:
                 logger.error(f"Unexpected error: {e}")
+                await self._report_event(
+                    "agent_error",
+                    reason="unexpected_error",
+                    attempt=attempt,
+                    max_attempts=max_retries,
+                    detail=str(e),
+                )
                 self._record_failure()
                 return None
             if isinstance(result.output, str):
@@ -267,6 +321,13 @@ class ToolChoosingAgent:
                 return result.output
             logger.error(
                 f"Unexpected agent output type: {type(result.output).__name__}"
+            )
+            await self._report_event(
+                "agent_error",
+                reason="unexpected_output_type",
+                attempt=attempt,
+                max_attempts=max_retries,
+                detail=type(result.output).__name__,
             )
             self._record_failure()
             return None
