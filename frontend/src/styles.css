@@ -236,7 +236,8 @@
   color: var(--color-muted-foreground);
 }
 
-/* Scrollbar for the event boxes and the challenge drawer: primary on secondary. */
+/* Scrollbar for the event boxes, the challenge drawer and the model menu:
+   accent on a dark track. */
 @utility event-scroll {
   scrollbar-width: thin;
   scrollbar-color: var(--primary) var(--secondary);
@@ -252,6 +253,17 @@
   }
   &::-webkit-scrollbar-thumb:hover {
     background: var(--foreground);
+  }
+}
+
+/* Radix injects `[data-radix-select-viewport]{scrollbar-width:none}` and
+   `::-webkit-scrollbar{display:none}` to hide the menu's native scrollbar.
+   Re-assert the accent one at higher specificity: the rest of the styling
+   still comes from `event-scroll`. */
+[data-radix-select-viewport].event-scroll {
+  scrollbar-width: thin;
+  &::-webkit-scrollbar {
+    display: block;
   }
 }
 

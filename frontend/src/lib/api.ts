@@ -6,6 +6,7 @@
  */
 
 import type {
+  AvailableModelsResponse,
   ChallengeSchema,
   ChallengeSummary,
   MatchEventListResponse,
@@ -65,9 +66,12 @@ export function getChallenge(challengeId: string): Promise<ChallengeSchema> {
   return request<ChallengeSchema>(`/api/v1/challenges/challenge?${query}`);
 }
 
-/** `GET /api/v1/matches/free-models` — selectable `provider/model` keys. */
-export function listFreeModels(): Promise<string[]> {
-  return request<string[]>("/api/v1/matches/free-models");
+/**
+ * `GET /api/v1/matches/free-models` — selectable models, split into free ones
+ * (the deployment's own keys) and BYOK ones (the caller's key).
+ */
+export function listModels(): Promise<AvailableModelsResponse> {
+  return request<AvailableModelsResponse>("/api/v1/matches/free-models");
 }
 
 /** `POST /api/v1/matches/start-match` — queue a match, returns its id. */

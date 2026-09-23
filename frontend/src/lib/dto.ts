@@ -71,6 +71,20 @@ export type StartMatchRequest = {
   /** Optional operator tips appended to the agent's role instructions. */
   prisoner_suggestions: string | null;
   warden_suggestions: string | null;
+  /**
+   * Provider key for a side using a BYOK model; used for that match only.
+   * `null` for a free model, which runs on the deployment's own key.
+   */
+  prisoner_api_key: string | null;
+  warden_api_key: string | null;
+};
+
+/** `AvailableModelsResponse` — selectable models, grouped by key requirement. */
+export type AvailableModelsResponse = {
+  /** Run on the deployment's own provider keys. */
+  free_models: string[];
+  /** Need a key for that side, supplied in `StartMatchRequest`. */
+  byok_models: string[];
 };
 
 /** `StartMatchResponse` — acknowledged queued match. */

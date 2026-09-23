@@ -4,7 +4,18 @@ import { useState } from "react";
 
 import { Eyebrow } from "@/components/arbiter/app-shell";
 import { Button } from "@/components/ui/button";
-import { getChallenge, listFreeModels, startMatch } from "@/lib/api";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectLabel,
+  SelectSeparator,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { getChallenge, listModels, startMatch } from "@/lib/api";
+import type { AvailableModelsResponse } from "@/lib/dto";
 
 export const Route = createFileRoute("/launch")({
   validateSearch: (
@@ -38,10 +49,12 @@ function LaunchPage() {
   const [wardenModel, setWardenModel] = useState("");
   const [prisonerSuggestions, setPrisonerSuggestions] = useState("");
   const [wardenSuggestions, setWardenSuggestions] = useState("");
+  const [prisonerApiKey, setPrisonerApiKey] = useState("");
+  const [wardenApiKey, setWardenApiKey] = useState("");
 
   const modelsQuery = useQuery({
     queryKey: ["free-models"],
-    queryFn: listFreeModels,
+    queryFn: listModels,
   });
 
   const challengeQuery = useQuery({
@@ -49,6 +62,24 @@ function LaunchPage() {
     queryFn: () => getChallenge(challengeId),
     enabled: challengeId !== "",
   });
+
+  const models: AvailableModelsResponse = modelsQuery.data ?? {
+    free_models: [],
+    byok_models: [],
+  };
+  const byokModels = new Set(models.byok_models);
+  const prisonersNeedsKey = byokModels.has(prisonerModel);
+  const wardenNeedsKey = byokModels.has(wardenModel);
+
+  /** Selecting a free model drops any key typed for the previous choice. */
+  const chooseModel = (
+    next: string,
+    setModel: (value: string) => void,
+    setApiKey: (value: string) => void,
+  ) => {
+    setModel(next);
+    if (!byokModels.has(next)) setApiKey("");
+  };
 
   const launch = useMutation({
     mutationFn: () =>
@@ -58,6 +89,10 @@ function LaunchPage() {
         warden_model: wardenModel,
         prisoner_suggestions: prisonerSuggestions.trim() || null,
         warden_suggestions: wardenSuggestions.trim() || null,
+        // Only ever sent for the side that needs it; a free model runs on the
+        // deployment's own key.
+        prisoner_api_key: prisonersNeedsKey ? prisonerApiKey.trim() : null,
+        warden_api_key: wardenNeedsKey ? wardenApiKey.trim() : null,
       }),
     onSuccess: (response) => {
       navigate({
@@ -72,13 +107,14 @@ function LaunchPage() {
     },
   });
 
-  const models = modelsQuery.data ?? [];
   const challenge = challengeQuery.data ?? null;
   const ready =
     challengeId !== "" &&
     prisonerModel !== "" &&
     wardenModel !== "" &&
     prisonerModel !== wardenModel &&
+    (!prisonersNeedsKey || prisonerApiKey.trim() !== "") &&
+    (!wardenNeedsKey || wardenApiKey.trim() !== "") &&
     !launch.isPending;
 
   if (challengeId === "") {
@@ -101,18 +137,13 @@ function LaunchPage() {
 
   return (
     <main className="mx-auto max-w-3xl px-5 py-12 lg:px-8">
-      <Eyebrow>LAUNCH_MATCH</Eyebrow>
-      <h1 className="mt-4 font-display text-3xl font-bold">
-        Configure Adversaries
-      </h1>
+      {/*<Eyebrow>LAUNCH_MATCH</Eyebrow>*/}
+      <h1 className="mt-4 font-display text-3xl font-bold">Select Agents</h1>
       <p className="mt-3 text-sm text-muted-foreground">
-        Choose one model per side. The same model cannot play both roles.
+        Choose one model per side.
       </p>
 
       <div className="data-panel mt-7 p-5">
-        <h2 className="text-[11px] text-muted-foreground">
-          // TARGET_CHALLENGE
-        </h2>
         {challengeQuery.isPending && (
           <p className="mt-3 text-sm text-muted-foreground">LOADING...</p>
         )}
@@ -123,8 +154,8 @@ function LaunchPage() {
         )}
         {challenge !== null && (
           <div className="mt-3">
-            <div className="text-sm font-bold">{challenge.name}</div>
-            <p className="mt-2 text-xs leading-5 text-muted-foreground">
+            <div className="text-md font-bold">{challenge.name}</div>
+            <p className="mt-2 text-md leading-5 text-muted-foreground">
               {challenge.description}
             </p>
             <p className="mt-3 text-[11px] text-primary">
@@ -137,23 +168,35 @@ function LaunchPage() {
       <div className="mt-5 grid gap-5 sm:grid-cols-2">
         <ModelSelect
           label="PRISONER"
-          hint="OFFENSIVE AGENT"
+          hint="Attacker"
           value={prisonerModel}
-          onChange={setPrisonerModel}
-          models={models.filter((model) => model !== wardenModel)}
+          onChange={(next) =>
+            chooseModel(next, setPrisonerModel, setPrisonerApiKey)
+          }
+          models={models}
+          excluded={wardenModel}
           loading={modelsQuery.isPending}
           suggestions={prisonerSuggestions}
           onSuggestionsChange={setPrisonerSuggestions}
+          needsKey={prisonersNeedsKey}
+          apiKey={prisonerApiKey}
+          onApiKeyChange={setPrisonerApiKey}
         />
         <ModelSelect
           label="WARDEN"
-          hint="DEFENSIVE AGENT"
+          hint="Defender"
           value={wardenModel}
-          onChange={setWardenModel}
-          models={models.filter((model) => model !== prisonerModel)}
+          onChange={(next) =>
+            chooseModel(next, setWardenModel, setWardenApiKey)
+          }
+          models={models}
+          excluded={prisonerModel}
           loading={modelsQuery.isPending}
           suggestions={wardenSuggestions}
           onSuggestionsChange={setWardenSuggestions}
+          needsKey={wardenNeedsKey}
+          apiKey={wardenApiKey}
+          onApiKeyChange={setWardenApiKey}
         />
       </div>
 
@@ -203,41 +246,109 @@ function ModelSelect({
   value,
   onChange,
   models,
+  excluded,
   loading,
   suggestions,
   onSuggestionsChange,
+  needsKey,
+  apiKey,
+  onApiKeyChange,
 }: {
   label: string;
   hint: string;
   value: string;
   onChange: (value: string) => void;
-  models: string[];
+  models: AvailableModelsResponse;
+  /** The other side's pick, which this side may not repeat. */
+  excluded: string;
   loading: boolean;
   suggestions: string;
   onSuggestionsChange: (value: string) => void;
+  needsKey: boolean;
+  apiKey: string;
+  onApiKeyChange: (value: string) => void;
 }) {
+  const freeModels = models.free_models.filter((model) => model !== excluded);
+  const byokModels = models.byok_models.filter((model) => model !== excluded);
+
   return (
     <div className="data-panel p-5">
       <span className="flex items-baseline justify-between">
         <span className="text-sm font-bold text-primary">{label}</span>
         <span className="text-[11px] text-muted-foreground">{hint}</span>
       </span>
-      <select
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        disabled={loading}
-        aria-label={`${label} model`}
-        className="mt-4 w-full border border-border bg-background px-3 py-3 text-sm text-foreground"
-      >
-        <option value="">
-          {loading ? "LOADING MODELS..." : "SELECT MODEL"}
-        </option>
-        {models.map((model) => (
-          <option key={model} value={model}>
-            {model}
-          </option>
-        ))}
-      </select>
+
+      <Select value={value} onValueChange={onChange} disabled={loading}>
+        <SelectTrigger
+          aria-label={`${label} model`}
+          className="mt-4 h-auto w-full rounded-none border-border bg-background px-3 py-3 text-sm data-[placeholder]:text-muted-foreground"
+        >
+          <SelectValue
+            placeholder={loading ? "LOADING MODELS..." : "SELECT MODEL"}
+          />
+        </SelectTrigger>
+        {/* Capped so the catalogue scrolls instead of running off the screen.
+            The accent scrollbar lives on the viewport (see ui/select.tsx). */}
+        <SelectContent className="max-h-[min(18rem,var(--radix-select-content-available-height))] rounded-none border-border bg-panel">
+          <SelectGroup>
+            <SelectLabel className="font-mono text-[10px] uppercase text-muted-foreground">
+              FREE MODELS
+            </SelectLabel>
+            <SelectSeparator className="bg-border" />
+            {freeModels.map((model) => (
+              <SelectItem
+                key={model}
+                value={model}
+                className="cursor-pointer rounded-none text-sm"
+              >
+                {model}
+              </SelectItem>
+            ))}
+          </SelectGroup>
+          <SelectSeparator className="bg-border" />
+          <SelectGroup>
+            <SelectLabel className="font-mono text-[10px] uppercase text-primary">
+              BYOK MODELS
+            </SelectLabel>
+            <SelectSeparator className="bg-border" />
+            {byokModels.map((model) => (
+              <SelectItem
+                key={model}
+                value={model}
+                className="cursor-pointer rounded-none text-sm"
+              >
+                {model}
+              </SelectItem>
+            ))}
+          </SelectGroup>
+        </SelectContent>
+      </Select>
+
+      {/* A BYOK model runs on the player's own key, so ask for it inline. */}
+      {needsKey && (
+        <div className="mt-3">
+          <label
+            htmlFor={`${label}-api-key`}
+            className="text-[10px] text-muted-foreground"
+          >
+            {label} API KEY
+          </label>
+          <input
+            id={`${label}-api-key`}
+            type="password"
+            value={apiKey}
+            onChange={(event) => onApiKeyChange(event.target.value)}
+            placeholder="Paste your provider API key"
+            autoComplete="off"
+            spellCheck={false}
+            aria-label={`${label} API key`}
+            className="mt-1 w-full border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground"
+          />
+          <p className="mt-1 text-[10px] text-muted-foreground">
+            Used for this match only.
+          </p>
+        </div>
+      )}
 
       {/* Shown only once a model is chosen, so the form stays compact. */}
       {value !== "" && (
