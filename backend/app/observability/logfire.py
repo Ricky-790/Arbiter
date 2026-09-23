@@ -6,6 +6,7 @@ from contextvars import ContextVar
 from typing import Any, Iterator
 
 import logfire
+from dotenv import load_dotenv
 from opentelemetry import trace
 from opentelemetry.sdk.trace import SpanProcessor
 from pydantic import BaseModel
@@ -14,7 +15,7 @@ from app.logger import get_logger
 from app.observability.models import MatchSpanAttributes, ToolSpanAttributes
 
 logger = get_logger()
-
+load_dotenv()
 # Context
 _current_match_id: ContextVar[str | None] = ContextVar(
     "arbiter_match_id",
