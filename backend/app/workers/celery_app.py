@@ -46,4 +46,8 @@ celery_app.conf.update(
     task_track_started=True,
     broker_connection_retry_on_startup=True,
     result_expires=3600,
+    broker_use_ssl={
+        "ssl_cert_reqs": None  # Disables strict CA validation check
+    },
+    redis_backend_use_ssl={"ssl_cert_reqs": None},
 )
