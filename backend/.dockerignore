@@ -1,0 +1,25 @@
+# Never bake credentials into an image layer. The app reads configuration from
+# the environment (docker run -e / compose env_file), not from a bundled .env.
+.env
+.logfire/
+a.json
+*.pem
+*.key
+
+# Host-only installs and caches.
+.venv/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Not part of the running service.
+tests/
+main.py
+AGENTS.md
+
+# Docker files themselves.
+Dockerfile
+.dockerignore

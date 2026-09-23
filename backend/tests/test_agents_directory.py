@@ -111,6 +111,19 @@ class SplitModelNameTests(unittest.TestCase):
         self.assertEqual(split_model_name("junk"), ("unknown", "junk"))
 
 
+def configured_key(model: object) -> object:
+    """The API key a built model's SDK client was constructed with.
+
+    Providers differ: the OpenAI-compatible clients (OpenAI, DeepSeek,
+    OpenRouter) expose ``api_key`` directly, while the Google client nests it
+    under ``_api_client``.
+    """
+    client = model.provider.client  # type: ignore[attr-defined]
+    if hasattr(client, "api_key"):
+        return client.api_key
+    return client._api_client.api_key
+
+
 class BuildAgentTests(unittest.TestCase):
     def test_every_catalogue_name_builds_an_agent(self) -> None:
         for name in BYOK_MODEL_NAMES:
@@ -122,16 +135,14 @@ class BuildAgentTests(unittest.TestCase):
             with self.subTest(name=name):
                 agent = build_agent(name, "sk-explicit-123")
                 # ``Agent.model`` -> provider -> SDK client, as constructed.
-                self.assertEqual(
-                    agent.model.provider.client.api_key, "sk-explicit-123"
-                )
+                self.assertEqual(configured_key(agent.model), "sk-explicit-123")
 
     def test_an_environment_key_is_never_fallen_back_to(self) -> None:
         """The key is a parameter, so a host env var must not be picked up."""
         with patch.dict(os.environ, {"OPENAI_API_KEY": "env-key"}, clear=False):
             agent = build_agent("openai:gpt-4o-mini", "explicit-key")
 
-        self.assertEqual(agent.model.provider.client.api_key, "explicit-key")
+        self.assertEqual(configured_key(agent.model), "explicit-key")
 
 
 class ResolveModelTests(unittest.TestCase):
@@ -143,7 +154,7 @@ class ResolveModelTests(unittest.TestCase):
     def test_byok_names_need_a_key_and_use_it(self) -> None:
         model = resolve_model("openai:gpt-4o-mini", "sk-byok")
 
-        self.assertEqual(model.provider.client.api_key, "sk-byok")
+        self.assertEqual(configured_key(model), "sk-byok")
 
     def test_a_key_for_a_free_model_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
