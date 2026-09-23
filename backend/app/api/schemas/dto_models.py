@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, SecretStr
 
 
 class PaginationMeta(BaseModel):
@@ -117,6 +117,12 @@ class StartMatchRequest(BaseModel):
     #: Optional free-text tips appended to each agent's role instructions.
     prisoner_suggestions: str | None = None
     warden_suggestions: str | None = None
+    #: BYOK provider keys for the side(s) using a BYOK model. Sent in the body,
+    #: never stored on the match row, never logged, and never echoed back. They
+    #: are held encrypted for the match only and handed to the worker by
+    #: reference (see :mod:`app.secrets`).
+    prisoner_api_key: SecretStr | None = None
+    warden_api_key: SecretStr | None = None
 
 
 class StartMatchResponse(BaseModel):
@@ -124,3 +130,14 @@ class StartMatchResponse(BaseModel):
 
     match_id: UUID
     status: str
+
+
+class AvailableModelsResponse(BaseModel):
+    """Selectable models, split by whether the caller must supply a key.
+
+    ``free_models`` run on this deployment's own provider keys; ``byok_models``
+    need a key for that side in the start-match request.
+    """
+
+    free_models: list[str]
+    byok_models: list[str]

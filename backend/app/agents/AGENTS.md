@@ -15,6 +15,23 @@ It decides **what an agent wants to do**.
 
 It does not decide whether an action is legal in the match.
 
+## Models: free and BYOK
+
+`agents_directory.py` owns both kinds of model, and `resolve_model()` is the
+only entry point the agent runtime uses.
+
+- **Free models** — `agent_mapper` maps a `provider/model` name onto a `Model`
+  built from this deployment's own keys (NVIDIA, Google, OpenRouter). These are
+  what `GET /matches/free-models` offers and they need no user key.
+- **BYOK models** — `BYOK_MODEL_NAMES` are `provider:model` names served by
+  `build_model()`, which takes the caller's API key as an argument. Covers
+  `openai`, `anthropic`, `deepseek`, `openrouter`, `google`.
+
+Never read a BYOK key from the environment and never assign one to one. Keys
+arrive per match from the request body, travel to the worker through the
+encrypted store in `app/secrets`, and are passed to `ToolChoosingAgent(api_key=)`.
+`resolve_model()` rejects a key passed for a free model rather than ignoring it.
+
 ## Agent/runtime boundary
 
 Agents use Pydantic AI's native tool-calling/deferred-tool mechanism.

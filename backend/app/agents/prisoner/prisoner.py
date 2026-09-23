@@ -14,9 +14,11 @@ class PrisonerAgent(ToolChoosingAgent):
         objective: str | None = None,
         instructions: str | None = None,
         scripted_calls: Iterable[ToolCall] | None = None,
+        api_key: str | None = None,
     ) -> None:
         """``instructions`` are optional operator tips appended to the role
-        instructions (see :func:`app.agents.base.with_tips`)."""
+        instructions (see :func:`app.agents.base.with_tips`). ``api_key`` is
+        required only when ``model_name`` names a BYOK model."""
         super().__init__(
             model_name=model_name,
             instructions=with_tips(PRISONER_INSTRUCTIONS, instructions),
@@ -30,4 +32,5 @@ class PrisonerAgent(ToolChoosingAgent):
             },
             objective=objective,
             scripted_calls=scripted_calls,
+            api_key=api_key,
         )

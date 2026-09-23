@@ -23,4 +23,9 @@ class MatchStartMessage(BaseModel):
     #: the matching agent's role instructions.
     prisoner_suggestions: str | None = None
     warden_suggestions: str | None = None
+    #: Whether that side is using a BYOK model with a user-supplied key. The
+    #: key itself never travels here -- only this reference does; the worker
+    #: redeems it from :mod:`app.secrets` by ``match_id``.
+    prisoner_byok: bool = False
+    warden_byok: bool = False
     timeout_seconds: float | None = None

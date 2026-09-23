@@ -29,6 +29,7 @@ from app.engine import Engine
 from app.logger import get_logger
 from app.sandbox.manager import SandboxManager, sandbox_manager
 from app.sandbox.models import ChallengeSpec, SandboxConfig
+from app.secrets import PRISONER, WARDEN, discard_api_keys, take_api_key
 
 from .celery_app import START_MATCH_TASK, celery_app
 
@@ -51,7 +52,12 @@ def start_match_task(self: Any, **payload: Any) -> dict[str, Any]:
 
 
 async def run_match(message: MatchStartMessage) -> dict[str, Any]:
-    """Load the challenge, run the match, and return a JSON-safe summary."""
+    """Load the challenge, run the match, and return a JSON-safe summary.
+
+    A side queued with ``*_byok`` redeems its user-supplied key here: the key
+    arrives by reference only, is read out of the encrypted store as the agents
+    are built, and is cleared again when the match is done.
+    """
     try:
         spec = await load_challenge_spec(message.challenge_id)
         timeout_seconds = message.timeout_seconds or default_timeout_seconds()
@@ -60,17 +66,14 @@ async def run_match(message: MatchStartMessage) -> dict[str, Any]:
         # is what makes it "running". The Engine finishes the lifecycle later
         # (completed/failed) on the same row.
         await mark_match_running(message.match_id)
-
-        prisoner = PrisonerAgent(
-            model_name=message.prisoner_model,
-            objective=prisoner_objective(spec),
-            instructions=message.prisoner_suggestions,
-        )
-        warden = WardenAgent(
-            model_name=message.warden_model,
-            objective=warden_objective(spec),
-            instructions=message.warden_suggestions,
-        )
+        try:
+            prisoner, warden = await build_agents(message, spec)
+        except Exception:
+            # The row is already "running" and the Engine never sees this
+            # match, so close it out here or it stays running forever.
+            logger.exception(f"Match {message.match_id} failed during setup")
+            await mark_match_failed(message.match_id)
+            raise
 
         match_metadata = build_match_metadata(message, spec)
 
@@ -95,7 +98,57 @@ async def run_match(message: MatchStartMessage) -> dict[str, Any]:
         logger.info(f"Match {message.match_id} finished: {summary}")
         return summary
     finally:
+        await discard_stored_byok_keys(message.match_id)
         await dispose_database()
+
+
+async def build_agents(
+    message: MatchStartMessage, spec: ChallengeSpec
+) -> tuple[PrisonerAgent, WardenAgent]:
+    """Build both agents, redeeming the BYOK key each side was queued with."""
+    prisoner_key = await redeem_byok_key(
+        message.match_id, PRISONER, message.prisoner_byok
+    )
+    warden_key = await redeem_byok_key(message.match_id, WARDEN, message.warden_byok)
+    return (
+        PrisonerAgent(
+            model_name=message.prisoner_model,
+            objective=prisoner_objective(spec),
+            instructions=message.prisoner_suggestions,
+            api_key=prisoner_key,
+        ),
+        WardenAgent(
+            model_name=message.warden_model,
+            objective=warden_objective(spec),
+            instructions=message.warden_suggestions,
+            api_key=warden_key,
+        ),
+    )
+
+
+async def redeem_byok_key(match_id: UUID, side: str, enabled: bool) -> str | None:
+    """Read one side's BYOK key, or ``None`` when it uses a free model.
+
+    The store deletes the entry as it is read, so from here the key lives only
+    in this worker process, holding the model client for this match.
+    """
+    if not enabled:
+        return None
+    api_key = await take_api_key(match_id, side)
+    if api_key is None:
+        raise RuntimeError(
+            f"BYOK key for the {side} of match {match_id} was not found "
+            "(expired before the worker picked the match up); queue it again"
+        )
+    return api_key
+
+
+async def discard_stored_byok_keys(match_id: UUID) -> None:
+    """Best-effort removal of any key this match never redeemed."""
+    try:
+        await discard_api_keys(match_id)
+    except Exception:
+        logger.exception(f"Failed to clear stored BYOK keys for match {match_id}")
 
 
 async def load_challenge_spec(challenge_id: UUID) -> ChallengeSpec:
@@ -117,6 +170,13 @@ async def mark_match_running(match_id: UUID) -> None:
     factory = get_session_factory()
     async with factory() as session:
         await matches_service.set_status(session, match_id, "running")
+
+
+async def mark_match_failed(match_id: UUID) -> None:
+    """Close a match that failed before the Engine could take it over."""
+    factory = get_session_factory()
+    async with factory() as session:
+        await matches_service.set_status(session, match_id, "failed")
 
 
 def build_match_metadata(

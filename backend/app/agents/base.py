@@ -19,7 +19,7 @@ from pydantic_ai.toolsets.external import ExternalToolset
 
 from app.logger import get_logger
 
-from .agents_directory import agent_mapper
+from .agents_directory import resolve_model
 from .tools.models import ToolCall
 from .tools.registry import ToolRegistry
 
@@ -143,14 +143,11 @@ class ToolChoosingAgent:
         objective: str | None = None,
         scripted_calls: Iterable[ToolCall] | None = None,
         registry: ToolRegistry | None = None,
+        api_key: str | None = None,
     ) -> None:
-        try:
-            model = agent_mapper[model_name]
-        except KeyError as error:
-            supported = ", ".join(sorted(agent_mapper))
-            raise ValueError(
-                f"Unknown agent model {model_name!r}; choose one of {supported}"
-            ) from error
+        # Free models resolve from the directory; a BYOK name is built here
+        # from the key the worker redeemed for this match.
+        model = resolve_model(model_name, api_key)
         self.allowed_tools = allowed_tools
         self.objective = objective
         self._scripted_calls = deque(scripted_calls or ())

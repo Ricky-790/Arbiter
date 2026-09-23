@@ -10,11 +10,18 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
+from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
-from app.agents.agents_directory import agent_mapper, split_model_name
+from app.agents.agents_directory import (
+    BYOK_MODEL_NAMES,
+    agent_mapper,
+    is_byok_model,
+    split_model_name,
+)
 from app.api.schemas.dto_models import (
+    AvailableModelsResponse,
     MatchEventListResponse,
     MatchEventSchema,
     MatchListResponse,
@@ -29,6 +36,13 @@ from app.db import get_session
 from app.db.models import Challenge, Match
 from app.db.services import match_events_service, matches_service
 from app.logger import get_logger
+from app.secrets import (
+    PRISONER,
+    WARDEN,
+    ByokStoreError,
+    discard_api_keys,
+    store_api_key,
+)
 
 logger = get_logger()
 
@@ -48,10 +62,17 @@ SSE_HEADERS = {
 }
 
 
-@router.get("/free-models")
-async def list_free_models() -> list[str]:
-    """Return the model names (``provider/model``) this deployment can host."""
-    return list(agent_mapper)
+@router.get("/free-models", response_model=AvailableModelsResponse)
+async def list_models() -> AvailableModelsResponse:
+    """Return the models this deployment can host, grouped by key requirement.
+
+    ``free_models`` run on the deployment's own provider keys; ``byok_models``
+    require the caller to send an API key for that side when starting a match.
+    """
+    return AvailableModelsResponse(
+        free_models=list(agent_mapper),
+        byok_models=list(BYOK_MODEL_NAMES),
+    )
 
 
 @router.get("/", response_model=MatchListResponse)
@@ -126,14 +147,38 @@ async def start_match(
 
     The caller can subscribe to ``/spectate?match_id=...`` right away; the
     worker picks the request off the queue and hosts the match.
+
+    A BYOK model needs the key for its side in this body. The key is written to
+    the encrypted short-lived store and only the match id goes on the queue, so
+    the credential is never part of a queued message or a match row.
     """
     challenge = await session.get(Challenge, payload.challenge_id)
     if challenge is None:
         raise HTTPException(status_code=404, detail="Challenge not found")
 
+    prisoner_key = _byok_key(
+        payload.prisoner_model, payload.prisoner_api_key, "prisoner"
+    )
+    warden_key = _byok_key(payload.warden_model, payload.warden_api_key, "warden")
+
     match_id = uuid4()
     prisoner_provider, prisoner_model = split_model_name(payload.prisoner_model)
     warden_provider, warden_model = split_model_name(payload.warden_model)
+
+    # Stored before anything is queued: if the store is unavailable the request
+    # fails here rather than leaving a match that can never build its agents.
+    if prisoner_key is not None or warden_key is not None:
+        try:
+            if prisoner_key is not None:
+                await store_api_key(match_id, PRISONER, prisoner_key)
+            if warden_key is not None:
+                await store_api_key(match_id, WARDEN, warden_key)
+        except ByokStoreError as error:
+            logger.error(f"BYOK key store unavailable: {error}")
+            raise HTTPException(
+                status_code=503, detail="BYOK key storage is unavailable"
+            ) from error
+
     await matches_service.create_queued_match(
         session,
         match_id=match_id,
@@ -152,18 +197,57 @@ async def start_match(
         warden_model=payload.warden_model,
         prisoner_suggestions=payload.prisoner_suggestions,
         warden_suggestions=payload.warden_suggestions,
+        prisoner_byok=prisoner_key is not None,
+        warden_byok=warden_key is not None,
     )
     try:
         # Celery's client is blocking; keep the request loop free.
         await run_in_threadpool(enqueue_match_start, message)
     except Exception as error:
         logger.exception(f"Failed to enqueue match (challenge {payload.challenge_id})")
+        await _discard_byok_keys(match_id)
         await matches_service.set_status(session, match_id, "failed")
         raise HTTPException(
             status_code=503, detail="Match queue is unavailable"
         ) from error
     logger.info(f"Queued match {match_id} for challenge {payload.challenge_id}")
     return StartMatchResponse(match_id=match_id, status="queued")
+
+
+def _byok_key(model_name: str, secret: SecretStr | None, side: str) -> str | None:
+    """Return the API key this side must use, or ``None`` for a free model.
+
+    Raises:
+        HTTPException: 400 if the model is unknown, or if it is a BYOK model
+            and no key came with the request.
+    """
+    key = secret.get_secret_value().strip() if secret is not None else ""
+    if is_byok_model(model_name):
+        if not key:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Model {model_name!r} is a BYOK model; "
+                    f"{side}_api_key is required"
+                ),
+            )
+        return key
+    if model_name not in agent_mapper:
+        raise HTTPException(status_code=400, detail=f"Unknown model {model_name!r}")
+    if key:
+        # Never log the value, only the fact that it was not needed.
+        logger.warning(
+            f"Ignoring {side} API key supplied for free model {model_name!r}"
+        )
+    return None
+
+
+async def _discard_byok_keys(match_id: UUID) -> None:
+    """Best-effort cleanup so a failed request leaves no key behind."""
+    try:
+        await discard_api_keys(match_id)
+    except Exception:
+        logger.exception(f"Failed to clear stored BYOK keys for match {match_id}")
 
 
 @router.post("/spectate")
