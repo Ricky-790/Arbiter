@@ -10,6 +10,9 @@ config = context.config
 
 # The deployment's DATABASE_URL wins over the placeholder in alembic.ini, so a
 # container or a remote host migrates the database the app actually uses.
+from dotenv import load_dotenv
+
+load_dotenv()
 if os.getenv("DATABASE_URL"):
     config.set_main_option("sqlalchemy.url", os.environ["DATABASE_URL"])
 
