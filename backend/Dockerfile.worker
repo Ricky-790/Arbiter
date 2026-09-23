@@ -8,6 +8,12 @@
 #
 # Postgres and Redis are external, reached through DATABASE_URL and REDIS_URL.
 #
+# The worker takes no inbound traffic -- the API reaches it through Redis, never
+# over HTTP -- but hosting platforms (Render, and private services generally)
+# refuse to mark a service healthy until something listens on PORT. So the
+# container binds that port with a minimal health endpoint (worker_health.py)
+# purely to satisfy the platform, and Celery runs in the foreground behind it.
+#
 # The API service owns schema migrations: it runs `alembic upgrade head` on
 # start, so this image deliberately does not, which keeps two services starting
 # at once from racing each other on the same migration.
@@ -20,6 +26,7 @@
 #                           keys for the free models
 #   ARBITER_BYOK_SECRET     encrypts user-supplied keys between API and worker
 #   LOGFIRE_TOKEN           observability; the worker reads it at import
+#   PORT                    port to bind for the platform (default 10000)
 #
 # Build from this directory:  docker build -f Dockerfile.worker -t arbiter-worker backend/
 #
@@ -49,15 +56,23 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-install-project
 
 COPY app ./app
+COPY worker_health.py ./
 
 # Normalise modes: files copied from the host can arrive owner-only (600),
 # which the non-root user below would then be unable to import.
-RUN chmod -R a+rX /app/app
+RUN chmod -R a+rX /app/app && chmod 644 /app/worker_health.py
 
 RUN useradd --create-home --uid 10001 arbiter
 USER arbiter
 
+# Render's default. Only the platform's health check talks to this port.
+ENV PORT=10000
+EXPOSE 10000
+
+# The health endpoint is started first so the platform sees the port open, then
+# `exec` hands the container to Celery: it becomes PID 1 and receives the stop
+# signal directly, and the container's lifetime is the worker's lifetime.
+#
 # One match at a time per worker: Solari hosts a single sandbox, and extra
 # matches queue on the broker rather than competing for it.
-CMD ["celery", "-A", "app.workers.celery_app", "worker", \
-     "--queues=arbiter.matches", "--concurrency=1", "--loglevel=INFO"]
+CMD ["sh", "-c", "python /app/worker_health.py & exec celery -A app.workers.celery_app worker --queues=arbiter.matches --concurrency=1 --loglevel=INFO"]
