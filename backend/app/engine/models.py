@@ -7,6 +7,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from app.agents.models import AgentType
+from app.agents.tools import ToolCall
 from app.agents.tools.models import ToolResult
 from app.sandbox.models import ChallengeSpec
 
@@ -52,3 +53,9 @@ class MatchState(BaseModel):
     started_at: datetime | None = None
     ended_at: datetime | None = None
     events: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ScriptedToolCall(BaseModel):
+    tool: ToolCall
+    timestamp: datetime
+    actor: AgentType

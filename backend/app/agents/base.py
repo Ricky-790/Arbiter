@@ -15,6 +15,7 @@ from pydantic_ai import (
 )
 from pydantic_ai.capabilities import HandleDeferredToolCalls
 from pydantic_ai.exceptions import ModelHTTPError
+from pydantic_ai.messages import UserPromptPart
 from pydantic_ai.toolsets.external import ExternalToolset
 
 from app.logger import get_logger
@@ -144,12 +145,14 @@ class ToolChoosingAgent:
         scripted_calls: Iterable[ToolCall] | None = None,
         registry: ToolRegistry | None = None,
         api_key: str | None = None,
+        # _enqueued_messages: list[UserPromptPart] | None = None,
     ) -> None:
         # Free models resolve from the directory; a BYOK name is built here
         # from the key the worker redeemed for this match.
         model = resolve_model(model_name, api_key)
         self.allowed_tools = allowed_tools
         self.objective = objective
+        self._enqueued_messages = []
         self._scripted_calls = deque(scripted_calls or ())
         self._scripted_mode = scripted_calls is not None
 
@@ -232,6 +235,12 @@ class ToolChoosingAgent:
                     "success": False,
                     "error": f"Tool execution failed: {error}",
                 }
+            for message in self._enqueued_messages:
+                try:
+                    ctx.enqueue(message)
+                except Exception as error:
+                    logger.error(f"Failed to enqueue agent message: {error}")
+            self._enqueued_messages.clear()
         return requests.build_results(calls=calls)
 
     async def run_turn(self, scratchpad: str = "") -> str | None:
@@ -333,6 +342,9 @@ class ToolChoosingAgent:
             f"Model unavailable after {max_attempts} attempts"
             + (f" (last status {last_status})" if last_status is not None else "")
         )
+
+    def inject_message(self, message: str):
+        self._enqueued_messages.append(UserPromptPart(message))
 
     #: Provider statuses worth another attempt within the same turn.
     _RETRYABLE_STATUSES: frozenset[int] = frozenset({429, 503, 504})

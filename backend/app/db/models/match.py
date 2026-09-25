@@ -37,6 +37,27 @@ class Match(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
+    parent_match_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "matches.id",
+            name="fk_matches_parent_match_id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+    )
+    branch_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "match_events.id",
+            name="fk_matches_branch_event_id",
+            ondelete="SET NULL",
+            use_alter=True,
+        ),
+        nullable=True,
+        index=True,
+    )
     challenge_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("challenges.id"),
@@ -72,6 +93,7 @@ class Match(Base):
     events: Mapped[list["MatchEvent"]] = relationship(
         "MatchEvent",
         back_populates="match",
+        foreign_keys="MatchEvent.match_id",
         cascade="all, delete-orphan",
         lazy="selectin",
         order_by="MatchEvent.timestamp",

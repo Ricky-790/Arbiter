@@ -51,11 +51,27 @@ class DbModelTests(unittest.TestCase):
     def test_matches_columns_and_fks(self) -> None:
         cols = Match.__table__.columns
         self.assertTrue(cols["challenge_id"].nullable is False)
+        self.assertTrue(cols["parent_match_id"].nullable)
+        self.assertTrue(cols["branch_event_id"].nullable)
         fks = {fk.parent.name: fk.column.table.name for fk in Match.__table__.foreign_keys}
-        self.assertEqual(fks, {"challenge_id": "challenges"})
+        self.assertEqual(
+            fks,
+            {
+                "challenge_id": "challenges",
+                "parent_match_id": "matches",
+                "branch_event_id": "match_events",
+            },
+        )
         self.assertTrue(cols["winner"].nullable)
         self.assertTrue(cols["duration_seconds"].nullable)
-        for indexed in ("challenge_id", "status", "winner", "created_at"):
+        for indexed in (
+            "challenge_id",
+            "status",
+            "winner",
+            "created_at",
+            "parent_match_id",
+            "branch_event_id",
+        ):
             self.assertTrue(cols[indexed].index, indexed)
         # status/winner stay plain VARCHAR until asked to change.
         self.assertIsInstance(cols["status"].type, type(cols["winner"].type))

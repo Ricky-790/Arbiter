@@ -63,5 +63,8 @@ class MatchEvent(Base):
     )
 
     match: Mapped["Match"] = relationship(
-        "Match", back_populates="events", lazy="selectin"
+        "Match",
+        back_populates="events",
+        foreign_keys="MatchEvent.match_id",
+        lazy="selectin",
     )

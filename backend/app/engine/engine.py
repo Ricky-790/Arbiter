@@ -68,8 +68,7 @@ def format_tool_call(call: ToolCall, value_limit: int = 200) -> str:
         rendered = _shorten(next(iter(arguments.values())), value_limit)
     else:
         rendered = ", ".join(
-            f"{key}={_shorten(value, value_limit)}"
-            for key, value in arguments.items()
+            f"{key}={_shorten(value, value_limit)}" for key, value in arguments.items()
         )
     text = f"{call.name}({rendered})"
     if len(text) > PRISONER_LOG_LINE_LIMIT:
@@ -501,6 +500,7 @@ class Engine:
         ) as match_sp:
             try:
                 await self.start()
+                # For resumability, first execute scripted calls, then start agent loop
                 workers = [
                     asyncio.create_task(self._agent_loop(AgentType.PRISONER, prisoner)),
                     asyncio.create_task(self._agent_loop(AgentType.WARDEN, warden)),
