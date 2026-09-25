@@ -20,8 +20,11 @@ class FakeSolariClient:
         self.watches: list[dict[str, object]] = []
         self.killed: list[object] = []
 
-    async def create(self, *, config: SandboxConfig) -> FakeSandbox:
+    async def create(
+        self, *, config: SandboxConfig, from_snapshot: str | None = None
+    ) -> FakeSandbox:
         self.config = config
+        self.from_snapshot = from_snapshot
         return self.sandbox
 
     async def kill(self, sandbox: object) -> None:
@@ -52,11 +55,13 @@ class OccupiedSolariClient(FakeSolariClient):
         self.failures = failures
         self.attempts = 0
 
-    async def create(self, *, config: SandboxConfig) -> FakeSandbox:
+    async def create(
+        self, *, config: SandboxConfig, from_snapshot: str | None = None
+    ) -> FakeSandbox:
         self.attempts += 1
         if self.attempts <= self.failures:
             raise ConcurrencyLimitError("sandbox limit reached")
-        return await super().create(config=config)
+        return await super().create(config=config, from_snapshot=from_snapshot)
 
 
 class SandboxManagerTests(unittest.IsolatedAsyncioTestCase):

@@ -39,16 +39,29 @@ class SolariClient:
             self._client_loop = loop
         return self._client
 
-    async def create(self, config: SandboxConfig | None = None) -> Sandbox:
+    async def create(
+        self, config: SandboxConfig | None = None, *, from_snapshot: str | None = None
+    ) -> Sandbox:
         if config is None:
             config = SandboxConfig()
         sbx: Sandbox = await self.client.create(
             template=config.template,
             cpu=config.cpu,
             mem_mb=config.mem_mb,
+            from_snapshot=from_snapshot,
         )
         await sbx.connect()
         return sbx
+
+    async def snapshot(self, sbx: Sandbox, *, name: str | None = None) -> str:
+        """Save the sandbox's current state and return the Solari snapshot id.
+
+        The sandbox keeps running, and a snapshot is self-contained, so it
+        outlives the sandbox this match destroys. The SDK drops
+        ``from_snapshot=None`` from the create body, so passing ``None`` above
+        means "bare template".
+        """
+        return await sbx.snapshot(name)
 
     async def kill(self, sbx: Sandbox) -> None:
         # pass

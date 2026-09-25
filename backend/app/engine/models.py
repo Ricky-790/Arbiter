@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
+from uuid import UUID
 
 from pydantic import BaseModel, Field
 
@@ -59,3 +60,23 @@ class ScriptedToolCall(BaseModel):
     tool: ToolCall
     timestamp: datetime
     actor: AgentType
+
+
+class ForkPlan(BaseModel):
+    """How to rebuild one forked match's sandbox before its agents start.
+
+    Produced by ``resumability.plan_fork`` from the source match's persisted
+    history: which Solari snapshot to boot (if any) and which calls still have
+    to be replayed on top of it.
+    """
+
+    source_match_id: UUID
+    branch_event_id: UUID
+    branch_event_timestamp: datetime
+    #: Solari snapshot to boot from; ``None`` means set the challenge up fresh.
+    snapshot_id: str | None = None
+    #: True when ``snapshot_id`` already reproduces the branch point, so there
+    #: is nothing to replay and no new snapshot worth taking.
+    snapshot_is_current: bool = False
+    #: Calls to replay after the snapshot, in recorded order.
+    tool_calls: list[ScriptedToolCall] = Field(default_factory=list)

@@ -46,9 +46,18 @@ class SandboxManager:
         self._monitors[match_id] = SandboxMonitor(match_id, handler)
 
     async def create_new_sandbox(
-        self, match_id: str, config: SandboxConfig | None = None
+        self,
+        match_id: str,
+        config: SandboxConfig | None = None,
+        *,
+        from_snapshot: str | None = None,
     ) -> Sandbox:
-        """Create a new sandbox instance"""
+        """Create a new sandbox instance.
+
+        ``from_snapshot`` boots a saved Solari snapshot instead of a bare
+        template, which is how a fork opens straight into already-reconstructed
+        state.
+        """
         sbx: Sandbox | None = self.sandboxes.get(match_id, None)
         if sbx:
             logger.error(f"A sandbox instance for match_id: {match_id} already exists")
@@ -56,7 +65,7 @@ class SandboxManager:
                 f"A sandbox instance for match_id: {match_id} already exists"
             )
         config = SandboxConfig() if config is None else config
-        sbx = await self.client.create(config=config)
+        sbx = await self.client.create(config=config, from_snapshot=from_snapshot)
         self.sandboxes[match_id] = sbx
         logger.info(f"Sandbox created. Currently active: {len(self.sandboxes)}")
         return sbx
@@ -67,6 +76,7 @@ class SandboxManager:
         config: SandboxConfig | None = None,
         *,
         wait_seconds: float | None = None,
+        from_snapshot: str | None = None,
     ) -> Sandbox:
         """Return the match sandbox, creating it once a Solari slot is free.
 
@@ -88,7 +98,9 @@ class SandboxManager:
             attempt += 1
             try:
                 return await self.create_new_sandbox(
-                    match_id=match_id, config=config or SandboxConfig()
+                    match_id=match_id,
+                    config=config or SandboxConfig(),
+                    from_snapshot=from_snapshot,
                 )
             except ConcurrencyLimitError as error:
                 remaining = deadline - time.monotonic()
@@ -134,6 +146,14 @@ class SandboxManager:
         self._auto_kill_rules.pop(match_id, None)
         self._monitors.pop(match_id, None)
         logger.info(f"Sandbox destroyed. Currently active: {len(self.sandboxes)}")
+
+    async def save_snapshot(self, match_id: str, *, name: str | None = None) -> str:
+        """Save the match sandbox's current state and return the snapshot id.
+
+        The sandbox keeps running and the snapshot is self-contained, so it
+        survives the ``destroy_sandbox`` that ends this match.
+        """
+        return await self.client.snapshot(await self.get_sandbox(match_id), name=name)
 
     async def run_command(
         self, *, match_id: str, command: str, user: str

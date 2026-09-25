@@ -107,7 +107,13 @@ class FakeSandboxManager:
         self.verifier_output = verifier_output
         self.commands: list[str] = []
 
-    async def get_or_create_sandbox(self, match_id: str, config: object) -> object:
+    async def get_or_create_sandbox(
+        self,
+        match_id: str,
+        config: object,
+        *,
+        from_snapshot: str | None = None,
+    ) -> object:
         return object()
 
     def set_event_handler(self, match_id: str, handler: object) -> None:

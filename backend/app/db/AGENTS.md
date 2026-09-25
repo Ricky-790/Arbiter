@@ -15,11 +15,11 @@ The Engine remains the source of truth for live match state. The database stores
 
 ## Tables
 
-V1 consists of three tables:
-
 - `challenges`
 - `matches`
 - `match_events`
+- `match_snapshots`
+- `match_agent_messages`
 
 ---
 
@@ -54,6 +54,8 @@ Stores one Prisoner-vs-Warden match.
 | Column              | Type                       | Constraints                    |
 | ------------------- | -------------------------- | ------------------------------ |
 | `id`                | `UUID`                     | Primary key                    |
+| `parent_match_id`   | `UUID`                     | FK → `matches.id`, nullable    |
+| `branch_event_id`   | `UUID`                     | FK → `match_events.id`, nullable |
 | `challenge_id`      | `UUID`                     | FK → `challenges.id`, not null |
 | `prisoner_model`    | `VARCHAR`                  | Not null                       |
 | `prisoner_provider` | `VARCHAR`                  | Not null                       |
@@ -163,11 +165,56 @@ A composite index on `(match_id, timestamp)` is preferred for efficient chronolo
 
 ---
 
+## `match_snapshots`
+
+Indexes Solari snapshots of a match's reconstructed state, so a later fork can
+boot from one instead of replaying history again.
+
+| Column                   | Type                       | Constraints                                |
+| ------------------------ | -------------------------- | ------------------------------------------ |
+| `id`                     | `UUID`                     | Primary key                                |
+| `match_id`               | `UUID`                     | FK → `matches.id`, not null, cascades      |
+| `branch_event_id`        | `UUID`                     | FK → `match_events.id`, not null, cascades |
+| `branch_event_timestamp` | `TIMESTAMP WITH TIME ZONE` | Not null                                   |
+| `solari_snapshot_id`     | `VARCHAR(255)`             | Not null                                   |
+| `created_at`             | `TIMESTAMP WITH TIME ZONE` | Not null                                   |
+
+`match_id` is the match whose history the snapshot reproduces — the *source*
+match being forked from, not the fork whose sandbox captured it — and
+`branch_event_id` is how far along that history it goes. That pair is unique,
+so two forks of the same point do not store the same state twice.
+
+`branch_event_timestamp` duplicates the event's timestamp so "the newest
+snapshot at or before event E" stays a single-table comparison. Rows are
+deleted with their match. The snapshot bytes live in Solari, not here.
+
+---
+
+## `match_agent_messages`
+
+One row per agent per match: the conversation that agent finished with.
+
+| Column       | Type                       | Constraints                           |
+| ------------ | -------------------------- | ------------------------------------- |
+| `id`         | `UUID`                     | Primary key                           |
+| `match_id`   | `UUID`                     | FK → `matches.id`, not null, cascades |
+| `actor`      | `VARCHAR(32)`              | Not null (`prisoner` / `warden`)      |
+| `messages`   | `JSONB`                    | Not null                              |
+| `created_at` | `TIMESTAMP WITH TIME ZONE` | Not null                              |
+
+`messages` is a JSON-safe dump of pydantic-ai's `all_messages()`, loadable with
+`ModelMessagesTypeAdapter.validate_python`. It is kept off `matches` so the
+archive listing never reads it. `(match_id, actor)` is unique.
+
+---
+
 ## Relationships
 
 ```text
 Challenge 1 ──── N Matches
 Match     1 ──── N MatchEvents
+Match     1 ──── N MatchSnapshots
+Match     1 ──── N MatchAgentMessages
 ```
 
 SQLAlchemy relationships:
@@ -179,6 +226,9 @@ Match.challenge
 Match.events
 MatchEvent.match
 ```
+
+`MatchSnapshot` and `MatchAgentMessages` are keyed by `match_id` but expose no
+ORM `relationship()`; they are read one match at a time.
 
 ---
 
@@ -213,9 +263,11 @@ win_rate
 app/db/
 ├── models/
 │   ├── __init__.py
+│   ├── agent_message.py
 │   ├── challenge.py
 │   ├── match.py
-│   └── match_event.py
+│   ├── match_event.py
+│   └── match_snapshot.py
 ├── ...
 ```
 
@@ -238,4 +290,6 @@ All schema changes must be implemented through Alembic migrations.
 - Do not put game rules inside database models.
 - Tools must not depend directly on the database.
 - PostgreSQL stores application state and match history.
+- Fork snapshots and agent message histories are written best-effort on the
+  Engine's cleanup path; neither may fail a match that has already finished.
 - Detailed LLM/tool telemetry remains in Logfire.

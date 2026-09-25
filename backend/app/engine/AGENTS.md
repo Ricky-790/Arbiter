@@ -171,8 +171,34 @@ Always:
 
 - cancel remaining agent tasks
 - gather them
+- save both agents' conversation histories (`_save_agent_messages`)
 - destroy the sandbox
 - leave the final match state authoritative
+
+The saved histories are what a later fork can seed its agents from. They are
+written best-effort, like the rest of the Engine's persistence: a storage
+failure must not affect a match that has already finished.
+
+## Fork restore
+
+A fork rebuilds its sandbox from a parent match's persisted history before its
+agents start. `run_agents(fork=...)` hands the Engine a `ForkPlan` -- produced
+by `resumability.plan_fork()` -- carrying the Solari snapshot to boot from, if
+any, and the calls still to replay on top of it.
+
+`restore_sandbox()` runs `start()` (from the snapshot when there is one),
+replays the remaining calls through the ordinary `execute_tool_call()` path with
+`replay_at` set to each call's recorded timestamp, then snapshots the rebuilt
+state for the next fork of that point.
+
+While replaying, `_replay_mode` suppresses persistence, spectator emission, and
+tracing, and `_replay_now` puts cooldown and trap-reaction comparisons on the
+replayed clock rather than the wall clock. The prisoner activity log is
+deliberately *not* suppressed: rebuilding it is part of restoring the sandbox.
+
+Never replay a call through a second authorization path. The replay exists to
+reproduce the live rules, so it must go through the real
+`execute_tool_call()`.
 
 ## Win condition
 

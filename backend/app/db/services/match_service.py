@@ -69,8 +69,14 @@ class MatchService:
         warden_model: str,
         warden_provider: str,
         win_condition: str,
+        parent_match_id: UUID | None = None,
+        branch_event_id: UUID | None = None,
     ) -> Match:
         """Insert the match row the moment it is queued.
+
+        ``parent_match_id`` and ``branch_event_id`` record lineage for a fork:
+        the match it branched from and the event it branched at. Both default
+        to ``None``, which is what a match started from scratch gets.
 
         ``ON CONFLICT DO NOTHING`` on the primary key keeps this idempotent, so
         a replayed request can never create a second record for one match. The
@@ -80,6 +86,8 @@ class MatchService:
             pg_insert(Match)
             .values(
                 id=match_id,
+                parent_match_id=parent_match_id,
+                branch_event_id=branch_event_id,
                 challenge_id=challenge_id,
                 prisoner_model=prisoner_model,
                 prisoner_provider=prisoner_provider,

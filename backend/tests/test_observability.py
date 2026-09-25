@@ -34,7 +34,13 @@ class FakeSandboxManager:
     def set_event_handler(self, match_id: str, handler: object) -> None:
         pass
 
-    async def get_or_create_sandbox(self, match_id: str, config: object) -> object:
+    async def get_or_create_sandbox(
+        self,
+        match_id: str,
+        config: object,
+        *,
+        from_snapshot: str | None = None,
+    ) -> object:
         return (match_id, config)
 
     async def destroy_sandbox(self, match_id: str) -> None:

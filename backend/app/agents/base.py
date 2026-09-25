@@ -15,7 +15,7 @@ from pydantic_ai import (
 )
 from pydantic_ai.capabilities import HandleDeferredToolCalls
 from pydantic_ai.exceptions import ModelHTTPError
-from pydantic_ai.messages import UserPromptPart
+from pydantic_ai.messages import ModelMessagesTypeAdapter, UserPromptPart
 from pydantic_ai.toolsets.external import ExternalToolset
 
 from app.logger import get_logger
@@ -46,6 +46,20 @@ def with_tips(instructions: str, tips: str | None) -> str:
     if tips is None or tips.strip() == "":
         return instructions
     return f"{instructions}\n\nTips: {tips.strip()}"
+
+
+def dump_agent_history(agent: Any) -> list[dict[str, Any]] | None:
+    """Return a JSON-safe dump of one agent's conversation, or ``None``.
+
+    ``None`` means the object keeps no history -- a scripted or test double --
+    so the caller can skip persisting it. pydantic-ai's own adapter is used, so
+    the result loads back with ``ModelMessagesTypeAdapter.validate_python``.
+    """
+    history = getattr(agent, "message_history", None)
+    messages = history() if callable(history) else history
+    if not messages:
+        return None
+    return ModelMessagesTypeAdapter.dump_python(list(messages), mode="json")
 
 
 def _function_signature_to_json_schema(tool: Any) -> dict[str, Any]:
@@ -342,6 +356,10 @@ class ToolChoosingAgent:
             f"Model unavailable after {max_attempts} attempts"
             + (f" (last status {last_status})" if last_status is not None else "")
         )
+
+    def message_history(self) -> list[Any]:
+        """This agent's pydantic-ai conversation so far (empty before a run)."""
+        return list(self._message_history or [])
 
     def inject_message(self, message: str):
         self._enqueued_messages.append(UserPromptPart(message))

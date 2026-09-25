@@ -21,7 +21,13 @@ class FakeSandboxManager:
     def set_event_handler(self, match_id: str, handler: object) -> None:
         self.event_handler = (match_id, handler)
 
-    async def get_or_create_sandbox(self, match_id: str, config: object) -> object:
+    async def get_or_create_sandbox(
+        self,
+        match_id: str,
+        config: object,
+        *,
+        from_snapshot: str | None = None,
+    ) -> object:
         self.sandbox = (match_id, config)
         return self.sandbox
 
@@ -196,7 +202,13 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
 class UnavailableSandboxManager(FakeSandboxManager):
     """Stands in for a Solari account whose only slot is still occupied."""
 
-    async def get_or_create_sandbox(self, match_id: str, config: object) -> object:
+    async def get_or_create_sandbox(
+        self,
+        match_id: str,
+        config: object,
+        *,
+        from_snapshot: str | None = None,
+    ) -> object:
         raise ConcurrencyLimitError("sandbox limit reached")
 
 

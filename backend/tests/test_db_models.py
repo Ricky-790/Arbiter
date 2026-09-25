@@ -2,16 +2,31 @@
 
 import unittest
 
+from sqlalchemy import UniqueConstraint
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import CreateIndex, CreateTable
 
-from app.db.models import Base, Challenge, Match, MatchEvent
+from app.db.models import (
+    Base,
+    Challenge,
+    Match,
+    MatchAgentMessages,
+    MatchEvent,
+    MatchSnapshot,
+)
 
 
 class DbModelTests(unittest.TestCase):
     def test_all_tables_registered(self) -> None:
         self.assertEqual(
-            set(Base.metadata.tables), {"challenges", "matches", "match_events"}
+            set(Base.metadata.tables),
+            {
+                "challenges",
+                "match_agent_messages",
+                "match_events",
+                "match_snapshots",
+                "matches",
+            },
         )
 
     def test_challenges_columns(self) -> None:
@@ -87,6 +102,38 @@ class DbModelTests(unittest.TestCase):
             for i in MatchEvent.__table__.indexes
         }
         self.assertIn(("match_id", "timestamp"), index_cols)
+
+    def test_fork_tables_columns_and_unique_keys(self) -> None:
+        snapshots = MatchSnapshot.__table__
+        self.assertFalse(snapshots.columns["match_id"].nullable)
+        self.assertFalse(snapshots.columns["branch_event_id"].nullable)
+        self.assertEqual(
+            {fk.parent.name: fk.column.table.name for fk in snapshots.foreign_keys},
+            {"match_id": "matches", "branch_event_id": "match_events"},
+        )
+        self.assertEqual(
+            {
+                tuple(column.name for column in constraint.columns)
+                for constraint in snapshots.constraints
+                if isinstance(constraint, UniqueConstraint)
+            },
+            {("match_id", "branch_event_id")},
+        )
+        self.assertTrue(snapshots.columns["match_id"].index)
+        self.assertTrue(snapshots.columns["branch_event_id"].index)
+
+        messages = MatchAgentMessages.__table__
+        self.assertIsInstance(messages.columns["messages"].type, postgresql.JSONB)
+        self.assertFalse(messages.columns["messages"].nullable)
+        self.assertTrue(messages.columns["match_id"].index)
+        self.assertEqual(
+            {
+                tuple(column.name for column in constraint.columns)
+                for constraint in messages.constraints
+                if isinstance(constraint, UniqueConstraint)
+            },
+            {("match_id", "actor")},
+        )
 
     def test_relationships(self) -> None:
         self.assertIn("matches", Challenge.__mapper__.relationships)

@@ -26,6 +26,8 @@ from app.db import get_engine, get_session_factory, reset_session_state
 from app.db.models import Challenge
 from app.db.services import matches_service
 from app.engine import Engine
+from app.engine.models import ForkPlan
+from app.engine.resumability import plan_fork
 from app.logger import get_logger
 from app.sandbox.manager import SandboxManager, sandbox_manager
 from app.sandbox.models import ChallengeSpec, SandboxConfig
@@ -67,6 +69,7 @@ async def run_match(message: MatchStartMessage) -> dict[str, Any]:
         # (completed/failed) on the same row.
         await mark_match_running(message.match_id)
         try:
+            fork = await load_fork_plan(message.match_id)
             prisoner, warden = await build_agents(message, spec)
         except Exception:
             # The row is already "running" and the Engine never sees this
@@ -88,7 +91,12 @@ async def run_match(message: MatchStartMessage) -> dict[str, Any]:
                 match_metadata=match_metadata,
             )
             logger.info(f"Starting match {message.match_id}")
-            await engine.run_agents(prisoner, warden, timeout_seconds=timeout_seconds)
+            await engine.run_agents(
+                prisoner,
+                warden,
+                timeout_seconds=timeout_seconds,
+                fork=fork,
+            )
             summary = {
                 "match_id": str(engine.state.match_id),
                 "status": engine.state.status.value,
@@ -177,6 +185,25 @@ async def mark_match_failed(match_id: UUID) -> None:
     factory = get_session_factory()
     async with factory() as session:
         await matches_service.set_status(session, match_id, "failed")
+
+
+async def load_fork_plan(match_id: UUID) -> ForkPlan | None:
+    """Return the restore plan when this match is a fork, else ``None``.
+
+    A fork's row carries the lineage the API wrote: the parent match it was
+    branched from and the event it branched at. A match without lineage starts
+    from scratch and gets no plan.
+    """
+    factory = get_session_factory()
+    async with factory() as session:
+        match = await matches_service.get_match(match_id, session)
+    if (
+        match is None
+        or match.parent_match_id is None
+        or match.branch_event_id is None
+    ):
+        return None
+    return await plan_fork(match.parent_match_id, match.branch_event_id)
 
 
 def build_match_metadata(

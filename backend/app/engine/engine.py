@@ -4,13 +4,14 @@ import asyncio
 import json
 import shlex
 from collections.abc import Awaitable, Callable
+from contextlib import nullcontext
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from pydantic_ai import ToolReturn
 
-from app.agents.base import AgentUnavailableError
+from app.agents.base import AgentUnavailableError, dump_agent_history
 from app.agents.models import AgentType
 from app.agents.tools import (
     PRISONER_LOG_PATH,
@@ -21,6 +22,7 @@ from app.agents.tools import (
 )
 from app.agents.tools.registry import build_default_registry
 from app.db.match_log import store_match_activity
+from app.db.services.agent_message_service import store_agent_history
 from app.logger import get_logger
 from app.observability import (
     agent_observability_context,
@@ -35,7 +37,8 @@ from app.sandbox.models import ChallengeSpec, SandboxEvent
 
 from .cooldowns import CooldownManager
 from .credits import CreditManager
-from .models import MatchState, MatchStatus, utc_now
+from .models import ForkPlan, MatchState, MatchStatus, utc_now
+from .resumability import store_fork_snapshot
 from .traps import TRAP_TOOL_NAMES, TrapManager
 from .verification import parse_verifier_verdict, validate_submission
 
@@ -231,30 +234,46 @@ class Engine:
         self.match_metadata = match_metadata
         self._action_lock = asyncio.Lock()
         self._stop_event = asyncio.Event()
+        #: True only while a forked match replays persisted tool calls to
+        #: rebuild its sandbox. Per-instance on purpose: a class attribute
+        #: would leak replay mode between matches in one worker process.
+        self._replay_mode = False
+        #: The instant of the call currently being replayed. Rule code that
+        #: would otherwise read the wall clock mid-restore (trap reaction
+        #: windows) anchors to this instead. ``None`` outside replay mode.
+        self._replay_now: datetime | None = None
         logger.info("Game engine instance initialized")
 
-    async def start(self) -> None:
-        """Set up the deterministic challenge environment through the manager."""
+    async def start(self, *, from_snapshot: str | None = None) -> None:
+        """Set up the deterministic challenge environment through the manager.
+
+        ``from_snapshot`` boots a Solari snapshot instead of a bare template.
+        That snapshot already contains the challenge setup -- and, for a fork,
+        the replayed history on top of it -- so the setup commands are skipped.
+        """
         if self.state.status is not MatchStatus.CREATED:
             logger.warning("Match is already started")
             raise RuntimeError("A match can only be started once")
         self.state.status = MatchStatus.SETTING_UP
         await self.sandbox_manager.get_or_create_sandbox(
-            self.state.match_id, self.state.challenge.sandbox
+            self.state.match_id,
+            self.state.challenge.sandbox,
+            from_snapshot=from_snapshot,
         )
         self.sandbox_manager.set_event_handler(
             self.state.match_id, self.handle_sandbox_event
         )
-        for command in self._setup_commands():
-            result = await self.sandbox_manager.run_command(
-                match_id=self.state.match_id, command=command, user="root"
-            )
-            if not result.success:
-                self.state.status = MatchStatus.ERROR
-                logger.error(f"Sandbox setup failed. Error: {result.error}")
-                raise RuntimeError(
-                    f"Sandbox setup failed: {result.error or result.output}"
+        if from_snapshot is None:
+            for command in self._setup_commands():
+                result = await self.sandbox_manager.run_command(
+                    match_id=self.state.match_id, command=command, user="root"
                 )
+                if not result.success:
+                    self.state.status = MatchStatus.ERROR
+                    logger.error(f"Sandbox setup failed. Error: {result.error}")
+                    raise RuntimeError(
+                        f"Sandbox setup failed: {result.error or result.output}"
+                    )
         self.state.status = MatchStatus.RUNNING
         self.state.started_at = utc_now()
         event = self._record("match_started")
@@ -295,16 +314,32 @@ class Engine:
             error=result.error,
         )
 
-    async def execute_tool_call(self, actor: AgentType, call: ToolCall) -> ToolResult:
+    async def execute_tool_call(
+        self,
+        actor: AgentType,
+        call: ToolCall,
+        *,
+        replay_at: datetime | None = None,
+    ) -> ToolResult:
         """Validate, charge, cool down, and delegate one agent-requested action.
 
         The tool span opens as soon as the request is received, so every
         outcome -- executed, rejected, or failed -- lands on that one span.
         Every outcome is also persisted: the requested tool plus its arguments
         go into ``action``, the outcome into ``result``.
+
+        ``replay_at`` marks a call re-executed while restoring a forked match
+        from persisted history, and carries the moment it originally ran.
+        Cooldown accounting is driven by that timestamp instead of the wall
+        clock, so a replay reaches the same accept/reject decisions the live
+        match did without spending real time. While replay mode is on nothing
+        is persisted, streamed to spectators, or traced -- the sandbox and the
+        Warden-visible prisoner log are what a replay rebuilds.
         """
         # Mirror the request into the Warden-visible log before it runs: the
         # Warden learns what the Prisoner attempted, never whether it worked.
+        # Deliberately not gated by replay mode: rebuilding this log is part
+        # of restoring the sandbox.
         if actor is AgentType.PRISONER and call.name not in PRIVATE_PRISONER_TOOLS:
             await self._log_prisoner_tool_call(call)
 
@@ -313,13 +348,20 @@ class Engine:
             async with (
                 self._action_lock  # Makes sure only one async task can access a shared resource
             ):
-                with tool_execution_span(
-                    match_id=self.state.match_id,
-                    agent_role=actor.value,
-                    tool_name=call.name,
-                    tool_args=call.arguments,
-                ) as span:
-                    result = await self._execute_tool_call_tracked(actor, call, span)
+                span_context = (
+                    nullcontext(None)
+                    if self._replay_mode
+                    else tool_execution_span(
+                        match_id=self.state.match_id,
+                        agent_role=actor.value,
+                        tool_name=call.name,
+                        tool_args=call.arguments,
+                    )
+                )
+                with span_context as span:
+                    result = await self._execute_tool_call_tracked(
+                        actor, call, span, replay_at=replay_at
+                    )
         except Exception as error:
             # A crashed tool call is still part of the match history.
             await self._persist(
@@ -334,43 +376,66 @@ class Engine:
             )
             raise
         # One persisted row per requested tool call, whatever the outcome.
+        # A rejection carries its category so the persisted history says *why*
+        # the Engine refused; that is what lets a forked match replay the calls
+        # that actually ran and skip the ones that never did.
+        outcome: dict[str, Any] = {
+            "success": result.success,
+            "exit_code": result.exit_code,
+            "error": result.error,
+        }
+        failure_category = result.metadata.get("failure_category")
+        if failure_category is not None:
+            outcome["failure_category"] = failure_category
         await self._persist(
             "tool_call",
             actor=actor.value,
             action=action,
-            result={
-                "success": result.success,
-                "exit_code": result.exit_code,
-                "error": result.error,
-            },
+            result=outcome,
         )
         return result
 
     async def _execute_tool_call_tracked(
-        self, actor: AgentType, call: ToolCall, span: Any | None
+        self,
+        actor: AgentType,
+        call: ToolCall,
+        span: Any | None,
+        *,
+        replay_at: datetime | None = None,
     ) -> ToolResult:
-        """Validation/execution body for one tool request; span already open."""
+        """Validation/execution body for one tool request; span already open.
+
+        ``replay_at`` is the timestamp a replayed call originally ran at and
+        drives cooldown accounting; ``None`` means a live call, which uses the
+        wall clock. ``span`` is ``None`` while replaying, when tracing is off.
+        """
 
         def reject(failure_category: str, error: str) -> ToolResult:
-            set_span_attributes(
-                span,
-                {
-                    "arbiter.status": "rejected",
-                    "arbiter.success": False,
-                    "arbiter.failure_category": failure_category,
-                    "arbiter.credits_charged": 0,
-                    **output_telemetry(None),
-                },
-            )
-            record_match_event(
-                "tool_rejected",
-                match_id=self.state.match_id,
-                actor=actor.value,
-                tool=call.name,
-                failure_category=failure_category,
+            if span is not None:
+                set_span_attributes(
+                    span,
+                    {
+                        "arbiter.status": "rejected",
+                        "arbiter.success": False,
+                        "arbiter.failure_category": failure_category,
+                        "arbiter.credits_charged": 0,
+                        **output_telemetry(None),
+                    },
+                )
+            if not self._replay_mode:
+                record_match_event(
+                    "tool_rejected",
+                    match_id=self.state.match_id,
+                    actor=actor.value,
+                    tool=call.name,
+                    failure_category=failure_category,
+                    success=False,
+                )
+            return ToolResult(
                 success=False,
+                error=error,
+                metadata={"failure_category": failure_category},
             )
-            return ToolResult(success=False, error=error)
 
         if self.state.status is not MatchStatus.RUNNING:
             logger.warning("Match not running")
@@ -385,7 +450,7 @@ class Engine:
         if not tool.is_available_to(actor):
             logger.fatal(f"Tool call fail: {actor.value} cannot use {call.name}")
             return reject("tool_not_allowed", f"{actor.value} cannot use {call.name}")
-        if not self.cooldowns.can_act(self.state, actor):
+        if not self.cooldowns.can_act(self.state, actor, now=replay_at):
             logger.warning(f"{actor} tool call: On Cooldown ")
             return reject("cooldown", "Tool cooldown is active")
         if not self.credits.can_afford(self.state, actor, tool.cost):
@@ -401,32 +466,34 @@ class Engine:
         # no credit deduction, no action cooldown.
         if call.name not in FREE_TOOL_NAMES:
             self.credits.deduct(self.state, actor, tool.cost)
-            self.cooldowns.start(self.state, actor)
+            self.cooldowns.start(self.state, actor, now=replay_at)
         context = EngineExecutionContext(self, actor)
         try:
             result = await tool.execute(context, **call.arguments)
         except Exception:
+            if span is not None:
+                set_span_attributes(
+                    span,
+                    {
+                        "arbiter.status": "failed",
+                        "arbiter.success": False,
+                        "arbiter.failure_category": "execution_error",
+                        "arbiter.credits_charged": tool.cost.value,
+                        **output_telemetry(None),
+                    },
+                )
+            raise
+        if span is not None:
             set_span_attributes(
                 span,
                 {
-                    "arbiter.status": "failed",
-                    "arbiter.success": False,
-                    "arbiter.failure_category": "execution_error",
+                    "arbiter.status": "executed",
+                    "arbiter.success": result.success,
+                    "arbiter.exit_code": result.exit_code,
                     "arbiter.credits_charged": tool.cost.value,
-                    **output_telemetry(None),
+                    **output_telemetry(result.output),
                 },
             )
-            raise
-        set_span_attributes(
-            span,
-            {
-                "arbiter.status": "executed",
-                "arbiter.success": result.success,
-                "arbiter.exit_code": result.exit_code,
-                "arbiter.credits_charged": tool.cost.value,
-                **output_telemetry(result.output),
-            },
-        )
         self._agent_state(actor).last_result = result
         self._record(
             "tool_result",
@@ -463,17 +530,24 @@ class Engine:
             if not matched:
                 return False
             trap = self.traps.trigger(self.state)
-            reaction_until = self.cooldowns.open_warden_reaction(self.state)
+            # Mid-replay "now" is the instant being replayed, so the Warden's
+            # cooldown/reaction fields land on the same clock as can_act's
+            # ``now=replay_at``. Using the wall clock here would write a
+            # future time into a historical timeline and invert the check.
+            reaction_until = self.cooldowns.open_warden_reaction(
+                self.state, now=self._replay_now if self._replay_mode else None
+            )
             recorded = self._record(
                 "trap_triggered",
                 trap=trap.tool_name if trap else None,
                 reaction_until=reaction_until.isoformat(),
             )
-            record_match_event(
-                "trap_triggered",
-                match_id=self.state.match_id,
-                trap=trap.tool_name if trap else None,
-            )
+            if not self._replay_mode:
+                record_match_event(
+                    "trap_triggered",
+                    match_id=self.state.match_id,
+                    trap=trap.tool_name if trap else None,
+                )
             await self._persist(
                 "trap_triggered",
                 result={"trap": trap.tool_name if trap else None},
@@ -481,12 +555,88 @@ class Engine:
             )
             return True
 
+    async def restore_sandbox(self, fork: ForkPlan | None = None) -> None:
+        """Rebuild a forked match's sandbox from its parent's history.
+
+        A match started from scratch passes ``None`` and this does nothing --
+        the caller runs :meth:`start` itself. A fork passes its plan: the
+        sandbox boots from the plan's snapshot when it has one (otherwise it is
+        set up fresh), every remaining call is replayed against it in recorded
+        order, and the rebuilt state is snapshotted for the next fork of that
+        point.
+
+        ``_replay_mode`` is left set so the caller knows setup already
+        happened. Cooldowns are replayed from each call's recorded timestamp
+        rather than the wall clock, so the replay reaches the same accept/reject
+        decisions the live match did without waiting out that time. Credits are
+        spent exactly as they were live. Nothing is persisted, streamed, or
+        traced while replaying: a fork's own history starts when its agents do.
+        The sandbox and the Warden-visible prisoner log are what gets rebuilt.
+        """
+        if fork is None:
+            return
+        await self.start(from_snapshot=fork.snapshot_id)
+        self._replay_mode = True
+        self._replay_now = fork.branch_event_timestamp
+        for scripted in fork.tool_calls:
+            # Anchor rule code that reads "now" to the instant being replayed,
+            # so it lands on the same historical clock as replay_at.
+            self._replay_now = scripted.timestamp
+            await self.execute_tool_call(
+                scripted.actor, scripted.tool, replay_at=scripted.timestamp
+            )
+        if not fork.snapshot_is_current:
+            await self._capture_fork_snapshot(fork)
+
+    async def _capture_fork_snapshot(self, fork: ForkPlan) -> None:
+        """Snapshot the rebuilt sandbox and index it for a later fork.
+
+        Best-effort: a snapshot only saves a future rebuild work, so failing to
+        take or store one must not disturb the match that is about to run.
+        """
+        if self.match_metadata is None:
+            return
+        try:
+            snapshot_id = await self.sandbox_manager.save_snapshot(
+                self.state.match_id,
+                name=f"fork-{fork.source_match_id}-event-{fork.branch_event_id}",
+            )
+        except Exception:
+            logger.exception("Failed to snapshot the restored sandbox")
+            return
+        await store_fork_snapshot(fork, snapshot_id)
+
+    async def _save_agent_messages(
+        self, prisoner: AgentActionSource, warden: AgentActionSource
+    ) -> None:
+        """Persist both agents' conversation histories before cleanup.
+
+        Best-effort, like the rest of the Engine's persistence: a storage
+        failure must not affect a match that has already finished. Agents that
+        keep no history -- scripted or test doubles -- are skipped.
+        """
+        if self.match_metadata is None:
+            return
+        for actor, source in (
+            (AgentType.PRISONER, prisoner),
+            (AgentType.WARDEN, warden),
+        ):
+            messages = dump_agent_history(source)
+            if messages is None:
+                continue
+            await store_agent_history(
+                match_id=self.state.match_id,
+                actor=actor.value,
+                messages=messages,
+            )
+
     async def run_agents(
         self,
         prisoner: AgentActionSource,
         warden: AgentActionSource,  # this means class / object type does not matter as long as it implements run_turn() + bind_tool_executor()
         *,
         timeout_seconds: float | None = None,
+        fork: ForkPlan | None = None,
     ) -> None:
         workers: list[asyncio.Task[None]] = []
         stop_waiter: asyncio.Task[bool] | None = None
@@ -499,8 +649,16 @@ class Engine:
             challenge_id=self.state.challenge.name,
         ) as match_sp:
             try:
-                await self.start()
-                # For resumability, first execute scripted calls, then start agent loop
+                # A fork restores its sandbox by replaying persisted history
+                # first. That helper runs start() itself and leaves
+                # _replay_mode set as the signal that setup is done; a match
+                # with nothing to restore starts normally here.
+                await self.restore_sandbox(fork)
+                if self._replay_mode:
+                    self._replay_mode = False
+                    self._replay_now = None
+                else:
+                    await self.start()
                 workers = [
                     asyncio.create_task(self._agent_loop(AgentType.PRISONER, prisoner)),
                     asyncio.create_task(self._agent_loop(AgentType.WARDEN, warden)),
@@ -526,6 +684,10 @@ class Engine:
                         worker.result()
                     self.finish(end_reason="agent action loop ended")
             finally:
+                # Replay is over however we got here; never let the replay
+                # gate swallow the final match row.
+                self._replay_mode = False
+                self._replay_now = None
                 for task in [*workers, stop_waiter, timeout_waiter]:
                     if task is None:
                         continue
@@ -539,6 +701,9 @@ class Engine:
                 )
                 if self.state.status is MatchStatus.RUNNING:
                     self.finish()
+                # Save the conversations before the sandbox goes away: this is
+                # the history a later fork can seed its agents from.
+                await self._save_agent_messages(prisoner, warden)
                 await self.sandbox_manager.destroy_sandbox(self.state.match_id)
                 await self._persist_match_finished()
             set_span_attributes(
@@ -790,8 +955,12 @@ class Engine:
         Persistence is enabled only for a real hosted match (one constructed
         with ``match_metadata``), so test/scripted engines stay off the
         database. ``store_match_activity`` never raises.
+
+        A replay writes nothing: the re-derived history belongs to the match
+        being restored, not to the fork, whose own history starts when its
+        agents do.
         """
-        if self.match_metadata is None:
+        if self._replay_mode or self.match_metadata is None:
             return
         await store_match_activity(
             match_id=self.state.match_id,
@@ -832,9 +1001,11 @@ class Engine:
         """Hand one event to the optional live sink.
 
         Best-effort by design: event delivery is a side channel for
-        spectators and must never affect match execution.
+        spectators and must never affect match execution. Suppressed while
+        replaying, so a fork's spectators never see restored history as if it
+        were happening now.
         """
-        if self.event_sink is None:
+        if self._replay_mode or self.event_sink is None:
             return
         try:
             self.event_sink(dict(event))

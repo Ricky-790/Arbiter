@@ -96,6 +96,17 @@ Cleanup must happen even when agent tasks fail or timeout. `destroy_sandbox()`
 tolerates a sandbox that was never created, so a setup failure is reported as
 itself rather than replaced by a lookup error during cleanup.
 
+## Snapshots
+
+`SandboxManager.save_snapshot(match_id)` wraps Solari's `Sandbox.snapshot()`. A
+snapshot is self-contained and the sandbox keeps running, so it outlives the
+`destroy_sandbox()` that ends the match; `get_or_create_sandbox(...,
+from_snapshot=...)` boots a new sandbox straight into one.
+
+Snapshots exist so a fork can open into already-reconstructed state instead of
+replaying a parent match's history again (`app/engine/resumability.py`). The
+Engine decides when to take one and what it means; this layer only forwards.
+
 ## Concurrency
 
 Avoid global mutable "current sandbox" state. Always use `match_id`.
