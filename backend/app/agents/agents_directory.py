@@ -162,6 +162,34 @@ def is_byok_model(model_name: str) -> bool:
     return model_name not in agent_mapper
 
 
+def join_model_name(provider: str, model: str) -> str | None:
+    """Rebuild the combined model key from the ``matches`` columns.
+
+    The inverse of :func:`split_model_name`: ``provider/model`` for a free
+    model, ``provider:model`` for a BYOK one, and ``None`` when the pair names
+    neither -- a model that has since left the catalogue.
+
+    The free catalogue is checked **first**, and that order matters.
+    :func:`is_byok_model` only parses a ``provider:model`` prefix, so building
+    ``openrouter:ling-3.0-flash-fin`` from a *free* OpenRouter model parses
+    happily as a BYOK name; checking BYOK first would classify free matches as
+    BYOK and refuse to fork them.
+
+    A pair present in both catalogues is genuinely ambiguous, because the row
+    stores only the split halves. ``google/gemini-3.1-flash-lite`` is free and
+    ``google:gemini-3.1-flash-lite`` is BYOK, and both collapse to
+    ``("google", "gemini-3.1-flash-lite")``; the free form wins here. Storing
+    the full name on the match row would remove the guesswork.
+    """
+    free_name = f"{provider}/{model}"
+    if free_name in agent_mapper:
+        return free_name
+    byok_name = f"{provider}:{model}"
+    if is_byok_model(byok_name):
+        return byok_name
+    return None
+
+
 def build_model(full_model_name: str, api_key: str) -> Model:
     """Build a BYOK ``Model`` for ``"provider:model"`` with ``api_key``.
 

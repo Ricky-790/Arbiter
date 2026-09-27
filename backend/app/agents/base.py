@@ -5,6 +5,7 @@ import inspect
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterable
 from typing import Any, Union, get_args, get_origin
+from uuid import uuid4
 
 from pydantic_ai import (
     Agent,
@@ -180,9 +181,9 @@ class ToolChoosingAgent:
 
         # Resolved per deferred request by the bound engine executor; None
         # until the engine binds it (standalone/scripted use has no executor).
-        self._tool_executor: Callable[[str, dict[str, Any]], Awaitable[Any]] | None = (
-            None
-        )
+        # The whole ToolCall is handed over, so the native tool-call id and its
+        # response batch travel with it into the Engine.
+        self._tool_executor: Callable[[ToolCall], Awaitable[Any]] | None = None
 
         # Bound by the Engine so retryable provider failures (rate limits,
         # 503/504) reach the match log and the spectator stream. Best-effort:
@@ -210,7 +211,7 @@ class ToolChoosingAgent:
 
     def bind_tool_executor(
         self,
-        executor: Callable[[str, dict[str, Any]], Awaitable[Any]],
+        executor: Callable[[ToolCall], Awaitable[Any]],
     ) -> None:
         """Bind the engine's authoritative tool executor for this match."""
         self._tool_executor = executor
@@ -237,15 +238,22 @@ class ToolChoosingAgent:
         """Native inline resolver: run each deferred call via the engine."""
         if self._tool_executor is None:
             return None
+        # One batch id for every call this response emitted: pydantic-ai puts
+        # their results in a single message, so they are atomic to a replay.
+        batch_id = str(uuid4())
         calls: dict[str, Any] = {}
-        for call in requests.calls:
+        for request in requests.calls:
+            call = ToolCall(
+                name=request.tool_name,
+                arguments=request.args_as_dict(),
+                tool_call_id=request.tool_call_id,
+                batch_id=batch_id,
+            )
             try:
-                calls[call.tool_call_id] = await self._tool_executor(
-                    call.tool_name, call.args_as_dict()
-                )
+                calls[request.tool_call_id] = await self._tool_executor(call)
             except Exception as error:
                 logger.error(f"Deferred tool executor failed: {error}")
-                calls[call.tool_call_id] = {
+                calls[request.tool_call_id] = {
                     "success": False,
                     "error": f"Tool execution failed: {error}",
                 }
@@ -276,7 +284,7 @@ class ToolChoosingAgent:
             if call.name not in self.allowed_tools:
                 raise ValueError(f"Agent selected unavailable tool {call.name!r}")
             if self._tool_executor is not None:
-                await self._tool_executor(call.name, dict(call.arguments))
+                await self._tool_executor(call)
             return None
         if self._scripted_mode:
             return None
@@ -360,6 +368,17 @@ class ToolChoosingAgent:
     def message_history(self) -> list[Any]:
         """This agent's pydantic-ai conversation so far (empty before a run)."""
         return list(self._message_history or [])
+
+    def load_message_history(self, messages: list[dict[str, Any]]) -> None:
+        """Seed this agent's conversation, resuming a forked match mid-history.
+
+        ``messages`` is the JSON dump ``dump_agent_history`` produces from a
+        parent match, already cut at the fork point, so the model continues
+        knowing what it had already tried instead of starting from nothing.
+        """
+        self._message_history = list(
+            ModelMessagesTypeAdapter.validate_python(messages)
+        )
 
     def inject_message(self, message: str):
         self._enqueued_messages.append(UserPromptPart(message))

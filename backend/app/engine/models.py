@@ -62,21 +62,37 @@ class ScriptedToolCall(BaseModel):
     actor: AgentType
 
 
-class ForkPlan(BaseModel):
-    """How to rebuild one forked match's sandbox before its agents start.
+class ForkBuildPlan(BaseModel):
+    """How to rebuild one fork's sandbox.
 
-    Produced by ``resumability.plan_fork`` from the source match's persisted
-    history: which Solari snapshot to boot (if any) and which calls still have
-    to be replayed on top of it.
+    ``base_snapshot_id`` is the closest state that is already rebuilt -- an
+    earlier fork of the same match, or the fork this match itself started from
+    -- so only ``tool_calls`` have to be replayed on top of it. ``None`` means
+    the challenge is set up fresh first.
+    """
+
+    branch_event_id: UUID
+    branch_event_timestamp: datetime
+    base_snapshot_id: str | None = None
+    #: Calls to replay after the base, in recorded order.
+    tool_calls: list[ScriptedToolCall] = Field(default_factory=list)
+
+
+class ForkPlan(BaseModel):
+    """What a forked match needs once its snapshot exists.
+
+    Produced by ``resumability.plan_resume``: the snapshot to boot and the
+    conversation each agent resumes from. Rebuilding the sandbox is deliberately
+    not part of this -- the fork worker already did that.
     """
 
     source_match_id: UUID
     branch_event_id: UUID
     branch_event_timestamp: datetime
-    #: Solari snapshot to boot from; ``None`` means set the challenge up fresh.
-    snapshot_id: str | None = None
-    #: True when ``snapshot_id`` already reproduces the branch point, so there
-    #: is nothing to replay and no new snapshot worth taking.
-    snapshot_is_current: bool = False
-    #: Calls to replay after the snapshot, in recorded order.
-    tool_calls: list[ScriptedToolCall] = Field(default_factory=list)
+    #: Solari snapshot that already reproduces the branch point.
+    snapshot_id: str
+    #: Each agent's conversation as of the branch point, ready to seed the
+    #: fork's agents. ``None`` when the parent stored no history, in which case
+    #: that agent starts blank.
+    prisoner_messages: list[dict[str, Any]] | None = None
+    warden_messages: list[dict[str, Any]] | None = None

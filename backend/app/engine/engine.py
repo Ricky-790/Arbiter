@@ -38,7 +38,6 @@ from app.sandbox.models import ChallengeSpec, SandboxEvent
 from .cooldowns import CooldownManager
 from .credits import CreditManager
 from .models import ForkPlan, MatchState, MatchStatus, utc_now
-from .resumability import store_fork_snapshot
 from .traps import TRAP_TOOL_NAMES, TrapManager
 from .verification import parse_verifier_verdict, validate_submission
 
@@ -93,7 +92,7 @@ def _shorten(value: Any, limit: int) -> str:
 @runtime_checkable
 class AgentActionSource(Protocol):
     def bind_tool_executor(
-        self, executor: Callable[[str, dict[str, Any]], Awaitable[Any]]
+        self, executor: Callable[[ToolCall], Awaitable[Any]]
     ) -> None: ...
 
     async def run_turn(self, scratchpad: str = "") -> str | None: ...
@@ -336,6 +335,10 @@ class Engine:
         is persisted, streamed to spectators, or traced -- the sandbox and the
         Warden-visible prisoner log are what a replay rebuilds.
         """
+        if replay_at is not None:
+            # Anchor rule code that reads "now" (trap reaction windows) to the
+            # instant being replayed rather than the wall clock.
+            self._replay_now = replay_at
         # Mirror the request into the Warden-visible log before it runs: the
         # Warden learns what the Prisoner attempted, never whether it worked.
         # Deliberately not gated by replay mode: rebuilding this log is part
@@ -343,7 +346,17 @@ class Engine:
         if actor is AgentType.PRISONER and call.name not in PRIVATE_PRISONER_TOOLS:
             await self._log_prisoner_tool_call(call)
 
-        action = {"tool": call.name, "arguments": call.arguments}
+        action: dict[str, Any] = {
+            "tool": call.name,
+            "arguments": call.arguments,
+        }
+        # Native provenance, when the call came from a model: the id lines this
+        # row up with the agent's stored conversation, and the batch id groups
+        # the calls one response emitted together (see ``ToolCall.batch_id``).
+        if call.tool_call_id is not None:
+            action["tool_call_id"] = call.tool_call_id
+        if call.batch_id is not None:
+            action["batch_id"] = call.batch_id
         try:
             async with (
                 self._action_lock  # Makes sure only one async task can access a shared resource
@@ -555,56 +568,27 @@ class Engine:
             )
             return True
 
-    async def restore_sandbox(self, fork: ForkPlan | None = None) -> None:
-        """Rebuild a forked match's sandbox from its parent's history.
+    def begin_replay(self) -> None:
+        """Start replaying persisted history into this match's sandbox.
 
-        A match started from scratch passes ``None`` and this does nothing --
-        the caller runs :meth:`start` itself. A fork passes its plan: the
-        sandbox boots from the plan's snapshot when it has one (otherwise it is
-        set up fresh), every remaining call is replayed against it in recorded
-        order, and the rebuilt state is snapshotted for the next fork of that
-        point.
+        Driven by the fork worker while it rebuilds a branch point: it runs
+        :meth:`start` (from a base snapshot or a fresh setup), calls this, and
+        then feeds each scripted call through :meth:`execute_tool_call`.
 
-        ``_replay_mode`` is left set so the caller knows setup already
-        happened. Cooldowns are replayed from each call's recorded timestamp
-        rather than the wall clock, so the replay reaches the same accept/reject
-        decisions the live match did without waiting out that time. Credits are
-        spent exactly as they were live. Nothing is persisted, streamed, or
-        traced while replaying: a fork's own history starts when its agents do.
-        The sandbox and the Warden-visible prisoner log are what gets rebuilt.
+        While replay mode is on nothing is persisted, streamed to spectators,
+        or traced. The sandbox and the Warden-visible prisoner log are the two
+        things a replay rebuilds, so the log stays on. Cooldowns are replayed
+        from each call's recorded timestamp rather than the wall clock, so the
+        replay reaches the same accept/reject decisions the live match did
+        without waiting out that time, and credits are spent exactly as they
+        were live.
         """
-        if fork is None:
-            return
-        await self.start(from_snapshot=fork.snapshot_id)
         self._replay_mode = True
-        self._replay_now = fork.branch_event_timestamp
-        for scripted in fork.tool_calls:
-            # Anchor rule code that reads "now" to the instant being replayed,
-            # so it lands on the same historical clock as replay_at.
-            self._replay_now = scripted.timestamp
-            await self.execute_tool_call(
-                scripted.actor, scripted.tool, replay_at=scripted.timestamp
-            )
-        if not fork.snapshot_is_current:
-            await self._capture_fork_snapshot(fork)
 
-    async def _capture_fork_snapshot(self, fork: ForkPlan) -> None:
-        """Snapshot the rebuilt sandbox and index it for a later fork.
-
-        Best-effort: a snapshot only saves a future rebuild work, so failing to
-        take or store one must not disturb the match that is about to run.
-        """
-        if self.match_metadata is None:
-            return
-        try:
-            snapshot_id = await self.sandbox_manager.save_snapshot(
-                self.state.match_id,
-                name=f"fork-{fork.source_match_id}-event-{fork.branch_event_id}",
-            )
-        except Exception:
-            logger.exception("Failed to snapshot the restored sandbox")
-            return
-        await store_fork_snapshot(fork, snapshot_id)
+    def end_replay(self) -> None:
+        """Leave replay mode and drop the replayed clock anchor."""
+        self._replay_mode = False
+        self._replay_now = None
 
     async def _save_agent_messages(
         self, prisoner: AgentActionSource, warden: AgentActionSource
@@ -630,6 +614,36 @@ class Engine:
                 messages=messages,
             )
 
+    def _seed_fork_histories(
+        self,
+        fork: ForkPlan | None,
+        prisoner: AgentActionSource,
+        warden: AgentActionSource,
+    ) -> None:
+        """Give a fork's agents the parent conversation they continue from.
+
+        Runs once the sandbox has been restored and before the agent loop
+        starts, so each side resumes from its own history already cut at the
+        fork point. Sources that cannot take a history -- scripted or test
+        doubles -- are skipped, and a history that will not load costs that
+        agent its memory rather than the match.
+        """
+        if fork is None:
+            return
+        for source, history in (
+            (prisoner, fork.prisoner_messages),
+            (warden, fork.warden_messages),
+        ):
+            if not history:
+                continue
+            loader = getattr(source, "load_message_history", None)
+            if loader is None:
+                continue
+            try:
+                loader(history)
+            except Exception:
+                logger.exception("Failed to seed a forked agent's conversation")
+
     async def run_agents(
         self,
         prisoner: AgentActionSource,
@@ -649,16 +663,16 @@ class Engine:
             challenge_id=self.state.challenge.name,
         ) as match_sp:
             try:
-                # A fork restores its sandbox by replaying persisted history
-                # first. That helper runs start() itself and leaves
-                # _replay_mode set as the signal that setup is done; a match
-                # with nothing to restore starts normally here.
-                await self.restore_sandbox(fork)
-                if self._replay_mode:
-                    self._replay_mode = False
-                    self._replay_now = None
-                else:
-                    await self.start()
+                # A fork boots the snapshot the fork worker already built; a
+                # match started from scratch sets its own challenge up. Hosting
+                # a fork never replays history -- that already happened on the
+                # fork queue.
+                await self.start(
+                    from_snapshot=fork.snapshot_id if fork is not None else None
+                )
+                # The agents pick up the conversation they left off in rather
+                # than starting blank.
+                self._seed_fork_histories(fork, prisoner, warden)
                 workers = [
                     asyncio.create_task(self._agent_loop(AgentType.PRISONER, prisoner)),
                     asyncio.create_task(self._agent_loop(AgentType.WARDEN, warden)),
@@ -684,10 +698,6 @@ class Engine:
                         worker.result()
                     self.finish(end_reason="agent action loop ended")
             finally:
-                # Replay is over however we got here; never let the replay
-                # gate swallow the final match row.
-                self._replay_mode = False
-                self._replay_now = None
                 for task in [*workers, stop_waiter, timeout_waiter]:
                     if task is None:
                         continue
@@ -742,11 +752,7 @@ class Engine:
         """
         binder = getattr(source, "bind_tool_executor", None)
         if binder is not None:
-            binder(
-                lambda tool_name, args: self._execute_deferred_tool(
-                    actor, tool_name, args
-                )
-            )
+            binder(lambda call: self._execute_deferred_tool(actor, call))
         # Provider-level events (rate limits, retries) come from inside the
         # agent, so it reports them back through the engine's normal match
         # event path: persisted to match_events and streamed to spectators.
@@ -797,18 +803,14 @@ class Engine:
             if output is None:
                 await asyncio.sleep(1.0)
 
-    async def _execute_deferred_tool(
-        self,
-        actor: AgentType,
-        tool_name: str,
-        args: dict[str, Any] | None,
-    ) -> Any:
+    async def _execute_deferred_tool(self, actor: AgentType, call: ToolCall) -> Any:
         """Native deferred-tool executor: pace, execute, map.
 
         Waits for the actor's cooldown (preserving one-action-per-window
         pacing inside native runs), executes through the authoritative
         ``execute_tool_call`` path, and maps the engine result to a
-        Pydantic AI tool return value.
+        Pydantic AI tool return value. The call carries its native id and
+        response batch, which ``execute_tool_call`` persists.
         """
         while (
             not self._stop_event.is_set()
@@ -816,7 +818,6 @@ class Engine:
             and not self.cooldowns.can_act(self.state, actor)
         ):
             await asyncio.sleep(0.05)
-        call = ToolCall(name=tool_name, arguments=dict(args or {}))
         logger.info(
             f"ToolCall Request[{actor}]: name={call.name} args={call.arguments}"
         )
