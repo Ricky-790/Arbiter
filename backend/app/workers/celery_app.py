@@ -1,9 +1,14 @@
-"""Celery application for Arbiter's match workers.
+"""Celery application for Arbiter's workers.
 
-Run a worker with::
+Two worker pools share this app and the same Redis broker, on separate queues:
 
+    # match worker -- hosts matches
     celery -A app.workers.celery_app worker \
         --queues=arbiter.matches --concurrency=1 --loglevel=INFO
+
+    # fork worker -- builds the saved forks a match is started from
+    celery -A app.workers.celery_app worker \
+        --queues=arbiter.forks --concurrency=1 --loglevel=INFO
 """
 
 from __future__ import annotations
@@ -20,8 +25,14 @@ DEFAULT_REDIS_URL = "redis://localhost:6379/0"
 #: Queue consumed by the match worker pool.
 MATCH_QUEUE = "arbiter.matches"
 
+#: Queue consumed by the fork worker pool, which only builds forks.
+FORK_QUEUE = "arbiter.forks"
+
 #: Task name registered by ``app.workers.match_worker``.
 START_MATCH_TASK = "arbiter.start_match"
+
+#: Task name registered by ``app.workers.fork_worker``.
+CREATE_FORK_TASK = "arbiter.create_fork"
 
 
 def redis_url() -> str:
@@ -33,7 +44,7 @@ celery_app = Celery(
     "arbiter",
     broker=redis_url(),
     backend=redis_url(),
-    include=["app.workers.match_worker"],
+    include=["app.workers.match_worker", "app.workers.fork_worker"],
 )
 
 celery_app.conf.update(
@@ -46,6 +57,9 @@ celery_app.conf.update(
     task_track_started=True,
     broker_connection_retry_on_startup=True,
     result_expires=3600,
+    # Fork building is slower and rarer than hosting a match, so it gets its
+    # own pool and can neither be starved by nor starve the match queue.
+    task_routes={CREATE_FORK_TASK: {"queue": FORK_QUEUE}},
     broker_use_ssl={
         "ssl_cert_reqs": ssl.CERT_NONE  # Disables strict CA validation check
     },

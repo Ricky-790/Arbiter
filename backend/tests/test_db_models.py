@@ -12,7 +12,7 @@ from app.db.models import (
     Match,
     MatchAgentMessages,
     MatchEvent,
-    MatchSnapshot,
+    MatchFork,
 )
 
 
@@ -24,7 +24,7 @@ class DbModelTests(unittest.TestCase):
                 "challenges",
                 "match_agent_messages",
                 "match_events",
-                "match_snapshots",
+                "match_forks",
                 "matches",
             },
         )
@@ -104,23 +104,31 @@ class DbModelTests(unittest.TestCase):
         self.assertIn(("match_id", "timestamp"), index_cols)
 
     def test_fork_tables_columns_and_unique_keys(self) -> None:
-        snapshots = MatchSnapshot.__table__
-        self.assertFalse(snapshots.columns["match_id"].nullable)
-        self.assertFalse(snapshots.columns["branch_event_id"].nullable)
+        forks = MatchFork.__table__
+        self.assertFalse(forks.columns["parent_match_id"].nullable)
+        self.assertFalse(forks.columns["branch_event_id"].nullable)
+        self.assertFalse(forks.columns["status"].nullable)
+        # A fork exists before its snapshot does.
+        self.assertTrue(forks.columns["solari_snapshot_id"].nullable)
+        self.assertIsInstance(forks.columns["prisoner_messages"].type, postgresql.JSONB)
+        self.assertIsInstance(forks.columns["warden_messages"].type, postgresql.JSONB)
         self.assertEqual(
-            {fk.parent.name: fk.column.table.name for fk in snapshots.foreign_keys},
-            {"match_id": "matches", "branch_event_id": "match_events"},
+            {fk.parent.name: fk.column.table.name for fk in forks.foreign_keys},
+            {
+                "parent_match_id": "matches",
+                "branch_event_id": "match_events",
+            },
         )
         self.assertEqual(
             {
                 tuple(column.name for column in constraint.columns)
-                for constraint in snapshots.constraints
+                for constraint in forks.constraints
                 if isinstance(constraint, UniqueConstraint)
             },
-            {("match_id", "branch_event_id")},
+            {("parent_match_id", "branch_event_id")},
         )
-        self.assertTrue(snapshots.columns["match_id"].index)
-        self.assertTrue(snapshots.columns["branch_event_id"].index)
+        self.assertTrue(forks.columns["parent_match_id"].index)
+        self.assertTrue(forks.columns["branch_event_id"].index)
 
         messages = MatchAgentMessages.__table__
         self.assertIsInstance(messages.columns["messages"].type, postgresql.JSONB)

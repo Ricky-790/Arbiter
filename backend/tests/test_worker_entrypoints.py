@@ -112,11 +112,24 @@ class ForkModelInheritanceTests(unittest.TestCase):
                 self.assertEqual(join_model_name(provider, model), name)
 
     def test_a_pair_in_both_catalogues_resolves_to_the_free_model(self) -> None:
-        """Pins a known limitation: the row stores only the split halves."""
-        provider, model = split_model_name("google:gemini-3.1-flash-lite")
-        self.assertIn(f"{provider}/{model}", agent_mapper)
-        self.assertIn(f"{provider}:{model}", BYOK_MODEL_NAMES)
-        self.assertEqual(join_model_name(provider, model), f"{provider}/{model}")
+        """Pins a known limitation: the row stores only the split halves.
+
+        Derived from the catalogues rather than hardcoded, so adding or
+        removing a model does not make this fail for the wrong reason.
+        """
+        collisions = []
+        for name in BYOK_MODEL_NAMES:
+            provider, _, model = name.partition(":")
+            if provider and model and f"{provider}/{model}" in agent_mapper:
+                collisions.append((provider, model))
+        if not collisions:
+            self.skipTest("no name is offered as both free and BYOK")
+
+        for provider, model in collisions:
+            with self.subTest(name=f"{provider}:{model}"):
+                self.assertEqual(
+                    join_model_name(provider, model), f"{provider}/{model}"
+                )
 
     def test_a_model_that_left_the_catalogue_joins_to_nothing(self) -> None:
         self.assertIsNone(join_model_name("nvidia", "not-a-real-model"))

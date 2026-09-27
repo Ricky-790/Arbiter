@@ -4,7 +4,7 @@
 # `Dockerfile`, with the worker as the default command instead of the API.
 #
 #   celery -A app.workers.celery_app worker \
-#       --queues=arbiter.matches --concurrency=1 --loglevel=INFO
+#       --queues=${CELERY_QUEUES} --concurrency=1 --loglevel=INFO
 #
 # Postgres and Redis are external, reached through DATABASE_URL and REDIS_URL.
 #
@@ -69,10 +69,14 @@ USER arbiter
 ENV PORT=10000
 EXPOSE 10000
 
+# Which pool this container is. The match worker keeps the default; the fork
+# worker service overrides it, and nothing else about the image changes.
+ENV CELERY_QUEUES=arbiter.matches
+
 # The health endpoint is started first so the platform sees the port open, then
 # `exec` hands the container to Celery: it becomes PID 1 and receives the stop
 # signal directly, and the container's lifetime is the worker's lifetime.
 #
 # One match at a time per worker: Solari hosts a single sandbox, and extra
 # matches queue on the broker rather than competing for it.
-CMD ["sh", "-c", "python /app/worker_health.py & exec celery -A app.workers.celery_app worker --queues=arbiter.matches --concurrency=1 --loglevel=INFO"]
+CMD ["sh", "-c", "python /app/worker_health.py & exec celery -A app.workers.celery_app worker --queues=${CELERY_QUEUES} --concurrency=1 --loglevel=INFO"]

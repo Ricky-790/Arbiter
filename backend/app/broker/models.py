@@ -29,3 +29,17 @@ class MatchStartMessage(BaseModel):
     prisoner_byok: bool = False
     warden_byok: bool = False
     timeout_seconds: float | None = None
+
+
+class ForkCreateMessage(BaseModel):
+    """A queued request to build one saved fork.
+
+    Consumed by the fork worker, which is separate from the match worker: it
+    rebuilds a match's state at a branch point, snapshots it, and records the
+    conversations each agent had up to there. It never starts a match -- a
+    match is started later, from the fork.
+    """
+
+    fork_id: UUID
+    parent_match_id: UUID
+    branch_event_id: UUID

@@ -18,23 +18,36 @@ from app.agents.agents_directory import (
     BYOK_MODEL_NAMES,
     agent_mapper,
     is_byok_model,
+    join_model_name,
     split_model_name,
 )
 from app.api.schemas.dto_models import (
     AvailableModelsResponse,
+    ForkDetailSchema,
+    ForkListResponse,
+    ForkMatchRequest,
+    ForkSchema,
     MatchEventListResponse,
     MatchEventSchema,
     MatchListResponse,
     MatchListSchema,
+    StartForkMatchRequest,
     StartMatchRequest,
     StartMatchResponse,
 )
 from app.broker.events import subscribe_match_events
-from app.broker.models import MatchStartMessage
-from app.broker.queue import enqueue_match_start
+from app.broker.models import ForkCreateMessage, MatchStartMessage
+from app.broker.queue import enqueue_fork_create, enqueue_match_start
 from app.db import get_session
-from app.db.models import Challenge, Match
-from app.db.services import match_events_service, matches_service
+from app.db.models import MATCH_TERMINAL_STATUSES, Challenge, Match
+from app.db.services import (
+    match_events_service,
+    match_forks_service,
+    matches_service,
+)
+from app.db.services.match_fork_service import FAILED as FORK_FAILED
+from app.db.services.match_fork_service import READY as FORK_READY
+from app.engine.resumability import load_fork_history, snap_branch_event
 from app.logger import get_logger
 from app.secrets import (
     PRISONER,
@@ -211,6 +224,248 @@ async def start_match(
             status_code=503, detail="Match queue is unavailable"
         ) from error
     logger.info(f"Queued match {match_id} for challenge {payload.challenge_id}")
+    return StartMatchResponse(match_id=match_id, status="queued")
+
+
+@router.post("/fork", response_model=ForkSchema, status_code=202)
+async def fork_match(
+    payload: ForkMatchRequest,
+    session: AsyncSession = Depends(get_session),
+) -> ForkSchema:
+    """Save a fork point on a finished match.
+
+    A fork is a checkpoint, not a match: it records the match's state at one
+    event so a *new* match can be started from it later with whatever models
+    and instructions the caller wants. Nothing is hosted here — the fork worker
+    rebuilds the state and the fork page starts matches from it.
+
+    The parent must have finished: a match still being hosted is writing its own
+    history, so its sandbox state and stored conversation are not yet the point
+    a fork would capture. The requested event is snapped forward to the end of
+    its model response, so two events of the same turn yield one fork.
+    """
+    parent = await matches_service.get_match(payload.parent_match_id, session)
+    if parent is None:
+        raise HTTPException(status_code=404, detail="Parent match not found")
+    if parent.status not in MATCH_TERMINAL_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Match {parent.id} is {parent.status}; a fork can only be "
+                "created once the match has finished"
+            ),
+        )
+
+    try:
+        event = await snap_branch_event(parent.id, payload.match_event_id, session)
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail="match_event_id does not belong to parent_match_id",
+        ) from error
+
+    fork, created = await match_forks_service.create_pending(
+        parent_match_id=parent.id,
+        branch_event_id=event.id,
+        branch_event_timestamp=event.timestamp,
+        session=session,
+    )
+    if not created and fork.status == FORK_FAILED:
+        # Retry rather than hand back a dead fork.
+        await match_forks_service.requeue(fork.id, session)
+        created = True
+
+    if created:
+        message = ForkCreateMessage(
+            fork_id=fork.id,
+            parent_match_id=parent.id,
+            branch_event_id=event.id,
+        )
+        try:
+            # Celery's client is blocking; keep the request loop free.
+            await run_in_threadpool(enqueue_fork_create, message)
+        except Exception as error:
+            logger.exception(f"Failed to enqueue fork of match {parent.id}")
+            await match_forks_service.mark_failed(fork.id, session)
+            raise HTTPException(
+                status_code=503, detail="Fork queue is unavailable"
+            ) from error
+        logger.info(f"Queued fork {fork.id} of match {parent.id} at event {event.id}")
+
+    stored = await match_forks_service.get_fork(fork.id, session)
+    assert stored is not None
+    return ForkSchema.model_validate(stored)
+
+
+@router.get("/forks", response_model=ForkListResponse)
+async def list_forks(
+    match_id: UUID | None = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+    session: AsyncSession = Depends(get_session),
+) -> ForkListResponse:
+    """Return saved forks, newest first.
+
+    Omit ``match_id`` for every saved fork — that is the forks tab — or pass it
+    to list one match's forks. This is the summary list; the conversations and
+    turn history live on ``GET /matches/fork``.
+    """
+    forks, total = await match_forks_service.list_forks(
+        session,
+        parent_match_id=match_id,
+        page=page,
+        page_size=page_size,
+    )
+    return ForkListResponse(
+        items=[ForkSchema.model_validate(fork) for fork in forks],
+        page=page,
+        page_size=page_size,
+        total=total,
+        pages=page_count(total, page_size),
+    )
+
+
+@router.get("/fork", response_model=ForkDetailSchema)
+async def get_fork(
+    fork_id: UUID = Query(...),
+    session: AsyncSession = Depends(get_session),
+) -> ForkDetailSchema:
+    """Return one saved fork with everything the fork page shows.
+
+    The challenge to start the match on, the parent's models as a starting point
+    for the picker, and the history the fork resumes from: the tool calls behind
+    the branch point and each agent's conversation up to there.
+    """
+    fork = await match_forks_service.get_fork(fork_id, session)
+    if fork is None:
+        raise HTTPException(status_code=404, detail="Fork not found")
+    parent = await matches_service.get_match(fork.parent_match_id, session)
+    if parent is None:
+        raise HTTPException(status_code=404, detail="Parent match not found")
+
+    history = await load_fork_history(
+        fork.parent_match_id, fork.branch_event_id, session
+    )
+    prisoner_messages = (
+        fork.prisoner_messages
+        if fork.prisoner_messages is not None
+        else history.prisoner_messages
+    )
+    warden_messages = (
+        fork.warden_messages
+        if fork.warden_messages is not None
+        else history.warden_messages
+    )
+
+    return ForkDetailSchema(
+        id=fork.id,
+        parent_match_id=fork.parent_match_id,
+        branch_event_id=history.branch_event_id,
+        branch_event_timestamp=history.branch_event_timestamp,
+        status=fork.status,
+        created_at=fork.created_at,
+        challenge_id=parent.challenge_id,
+        prisoner_model=join_model_name(
+            parent.prisoner_provider, parent.prisoner_model
+        ),
+        warden_model=join_model_name(parent.warden_provider, parent.warden_model),
+        latest_turns=[
+            MatchEventSchema.model_validate(event) for event in history.turns
+        ],
+        prisoner_messages=prisoner_messages,
+        warden_messages=warden_messages,
+    )
+
+
+@router.post(
+    "/start-from-fork",
+    response_model=StartMatchResponse,
+    status_code=202,
+)
+async def start_from_fork(
+    payload: StartForkMatchRequest,
+    session: AsyncSession = Depends(get_session),
+) -> StartMatchResponse:
+    """Start a new match from a saved fork.
+
+    The fork supplies the challenge, the sandbox state, and the conversation
+    each agent resumes from; the body supplies the models, tips, and keys, so
+    the same fork can be run as many different experiments. The new match
+    records the fork's branch point as its own lineage, which is what the match
+    worker reads to resume it.
+    """
+    fork = await match_forks_service.get_fork(payload.fork_id, session)
+    if fork is None:
+        raise HTTPException(status_code=404, detail="Fork not found")
+    if fork.status != FORK_READY:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Fork {fork.id} is {fork.status}; it can only be started once "
+                "its snapshot is ready"
+            ),
+        )
+
+    parent = await matches_service.get_match(fork.parent_match_id, session)
+    if parent is None:
+        raise HTTPException(status_code=404, detail="Parent match not found")
+
+    prisoner_key = _byok_key(
+        payload.prisoner_model, payload.prisoner_api_key, "prisoner"
+    )
+    warden_key = _byok_key(payload.warden_model, payload.warden_api_key, "warden")
+
+    match_id = uuid4()
+    prisoner_provider, prisoner_model = split_model_name(payload.prisoner_model)
+    warden_provider, warden_model = split_model_name(payload.warden_model)
+
+    if prisoner_key is not None or warden_key is not None:
+        try:
+            if prisoner_key is not None:
+                await store_api_key(match_id, PRISONER, prisoner_key)
+            if warden_key is not None:
+                await store_api_key(match_id, WARDEN, warden_key)
+        except ByokStoreError as error:
+            logger.error(f"BYOK key store unavailable: {error}")
+            raise HTTPException(
+                status_code=503, detail="BYOK key storage is unavailable"
+            ) from error
+
+    await matches_service.create_queued_match(
+        session,
+        match_id=match_id,
+        challenge_id=parent.challenge_id,
+        prisoner_model=prisoner_model,
+        prisoner_provider=prisoner_provider,
+        warden_model=warden_model,
+        warden_provider=warden_provider,
+        win_condition=parent.win_condition,
+        # The fork's own branch point, so the match worker knows what to resume.
+        parent_match_id=fork.parent_match_id,
+        branch_event_id=fork.branch_event_id,
+    )
+
+    message = MatchStartMessage(
+        match_id=match_id,
+        challenge_id=parent.challenge_id,
+        prisoner_model=payload.prisoner_model,
+        warden_model=payload.warden_model,
+        prisoner_suggestions=payload.prisoner_suggestions,
+        warden_suggestions=payload.warden_suggestions,
+        prisoner_byok=prisoner_key is not None,
+        warden_byok=warden_key is not None,
+    )
+    try:
+        await run_in_threadpool(enqueue_match_start, message)
+    except Exception as error:
+        logger.exception(f"Failed to enqueue match from fork {fork.id}")
+        await _discard_byok_keys(match_id)
+        await matches_service.set_status(session, match_id, "failed")
+        raise HTTPException(
+            status_code=503, detail="Match queue is unavailable"
+        ) from error
+
+    logger.info(f"Queued match {match_id} from fork {fork.id}")
     return StartMatchResponse(match_id=match_id, status="queued")
 
 

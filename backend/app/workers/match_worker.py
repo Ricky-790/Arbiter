@@ -27,7 +27,7 @@ from app.db.models import Challenge
 from app.db.services import matches_service
 from app.engine import Engine
 from app.engine.models import ForkPlan
-from app.engine.resumability import plan_fork
+from app.engine.resumability import plan_resume
 from app.logger import get_logger
 from app.sandbox.manager import SandboxManager, sandbox_manager
 from app.sandbox.models import ChallengeSpec, SandboxConfig
@@ -203,7 +203,7 @@ async def load_fork_plan(match_id: UUID) -> ForkPlan | None:
         or match.branch_event_id is None
     ):
         return None
-    return await plan_fork(match.parent_match_id, match.branch_event_id)
+    return await plan_resume(match_id)
 
 
 def build_match_metadata(
