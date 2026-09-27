@@ -600,6 +600,10 @@ class Engine:
         keep no history -- scripted or test doubles -- are skipped.
         """
         if self.match_metadata is None:
+            logger.warning(
+                f"[{self.state.match_id}] not saving conversations: the engine "
+                "was built without match metadata"
+            )
             return
         for actor, source in (
             (AgentType.PRISONER, prisoner),
@@ -607,6 +611,13 @@ class Engine:
         ):
             messages = dump_agent_history(source)
             if messages is None:
+                # Silence here is indistinguishable from a successful write,
+                # and an empty history is exactly what makes a fork's agents
+                # repeat work, so say it out loud.
+                logger.warning(
+                    f"[{self.state.match_id}] {actor.value} finished with no "
+                    "conversation history; nothing saved for it"
+                )
                 continue
             await store_agent_history(
                 match_id=self.state.match_id,

@@ -42,8 +42,8 @@ liquid_ai_lfm = OpenRouterModel(
 minimax_m3 = OpenAIChatModel(
     model_name="minimaxai/minimax-m3", provider=nvidia_provider
 )
-ling_3_flash = OpenRouterModel(
-    model_name="inclusionai/ling-3.0-flash-vl:free", provider=openrouter_provider
+ling_3_flash_fin = OpenRouterModel(
+    model_name="inclusionai/ling-3.0-flash-fin:free", provider=openrouter_provider
 )
 settings = ModelSettings(temperature=0.5, thinking="low")
 glm_5_3 = OpenAIChatModel(model_name="z-ai/glm-5.3-flash", provider=nvidia_provider)
@@ -52,15 +52,16 @@ deepseek_v4_flash = OpenAIChatModel(
     provider=nvidia_provider,
     settings=settings,
 )
+ling_flash_sante = OpenRouterModel(
+    model_name="inclusionai/ling-3.0-flash-sante:free", provider=openrouter_provider
+)
 agent_mapper = {
     "nvidia/laguna-xs-2.1": laguna,
-    # "google/gemini-3.6-flash": gemini_3_6,
-    # "openrouter/lfm-2.5-2.6b": liquid_ai_lfm,
-    # "nvidia/minimax-m3": minimax_m3,
-    # "openrouter/ling-3.0-flash": ling_3_flash,
     "nvidia/glm-5.3": glm_5_3,
-    # "google/gemini-3.1-flash-lite": gemini_3_1,
+    "google/gemini-3.1-flash-lite": gemini_3_1,
     "nvidia/deepseek-v4-flash-0731": deepseek_v4_flash,
+    "inclusionai/ling-3.0-flash-sante:free": ling_flash_sante,
+    "inclusionai/ling-3.0-flash-fin:free": ling_3_flash_fin,
 }
 
 

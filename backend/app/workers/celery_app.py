@@ -12,8 +12,9 @@ Two worker pools share this app and the same Redis broker, on separate queues:
 """
 
 from __future__ import annotations
-import ssl
+
 import os
+import ssl
 
 from celery import Celery
 from dotenv import load_dotenv
@@ -60,8 +61,8 @@ celery_app.conf.update(
     # Fork building is slower and rarer than hosting a match, so it gets its
     # own pool and can neither be starved by nor starve the match queue.
     task_routes={CREATE_FORK_TASK: {"queue": FORK_QUEUE}},
-    broker_use_ssl={
-        "ssl_cert_reqs": ssl.CERT_NONE  # Disables strict CA validation check
-    },
-    redis_backend_use_ssl={"ssl_cert_reqs": ssl.CERT_NONE},
+    # broker_use_ssl={
+    #     "ssl_cert_reqs": ssl.CERT_NONE  # Disables strict CA validation check
+    # },
+    # redis_backend_use_ssl={"ssl_cert_reqs": ssl.CERT_NONE},
 )
