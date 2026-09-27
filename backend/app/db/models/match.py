@@ -22,6 +22,11 @@ MATCH_STATUSES = (
     "cancelled",
 )
 
+#: Statuses a match can no longer leave -- it is over, one way or another.
+#: Only these can be forked: a match still being hosted is writing its own
+#: history, so a fork of it would not resume from the point it claims to.
+MATCH_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
 #: Allowed ``winner`` values; NULL until the match finishes.
 MATCH_WINNERS = ("prisoner", "warden", "draw")
 

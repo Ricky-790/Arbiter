@@ -60,6 +60,30 @@ class MatchEventService:
         """Return one event row by id, or ``None``."""
         return await session.get(MatchEvent, event_id)
 
+    async def get_batch_end(
+        self,
+        match_id: UUID,
+        batch_id: str,
+        session: AsyncSession,
+    ) -> MatchEvent | None:
+        """Return the last tool call of one model response, or ``None``.
+
+        A fork snaps forward to the end of the batch its branch event belongs
+        to, because pydantic-ai returns a response's tool results in a single
+        message: no conversation state exists between two calls of one batch.
+        """
+        result = await session.execute(
+            select(MatchEvent)
+            .where(
+                MatchEvent.match_id == match_id,
+                MatchEvent.event_type == TOOL_CALL_EVENT_TYPE,
+                MatchEvent.action["batch_id"].astext == batch_id,
+            )
+            .order_by(MatchEvent.timestamp.desc(), MatchEvent.id.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
     async def get_tool_calls_until_event(
         self,
         match_id: UUID,
