@@ -238,6 +238,13 @@ class ToolChoosingAgent:
         """Native inline resolver: run each deferred call via the engine."""
         if self._tool_executor is None:
             return None
+        # Snapshot the conversation pydantic-ai has built so far. ``run_turn``
+        # only stores the history once a run *returns*, and the Engine cancels
+        # an in-flight turn when the match ends -- a winning ``submit_flag``
+        # ends it from inside the very run that would have stored the history,
+        # which left both agents with nothing to save. pydantic-ai's own view is
+        # already correct up to the request in flight.
+        self._message_history = list(ctx.messages)
         # One batch id for every call this response emitted: pydantic-ai puts
         # their results in a single message, so they are atomic to a replay.
         batch_id = str(uuid4())
