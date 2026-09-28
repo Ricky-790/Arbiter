@@ -12,24 +12,21 @@ import { useEffect, type ReactNode } from "react";
 import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
 import { AppShell } from "@/components/arbiter/app-shell";
+import { Toaster } from "@/components/ui/sonner";
 
 function NotFoundComponent() {
   return (
-    <div className="flex min-h-screen items-center justify-center bg-background px-4">
-      <div className="max-w-md text-center">
-        <h1 className="text-7xl font-bold text-foreground">404</h1>
-        <h2 className="mt-4 text-xl font-semibold text-foreground">
-          Page not found
-        </h2>
-        <p className="mt-2 text-sm text-muted-foreground">
-          The page you're looking for doesn't exist or has been moved.
+    <div className="not-found">
+      <div className="not-found-card">
+        <div className="not-found-number">404</div>
+        <h1 className="not-found-title">This room is not on the map.</h1>
+        <p className="not-found-copy">
+          The page you are looking for does not exist or has been moved out of
+          the arena.
         </p>
-        <div className="mt-6">
-          <Link
-            to="/"
-            className="inline-flex items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
-          >
-            Go home
+        <div className="not-found-actions">
+          <Link to="/" className="button-primary">
+            Return to the front desk
           </Link>
         </div>
       </div>
@@ -45,29 +42,26 @@ function ErrorComponent({ error, reset }: { error: Error; reset: () => void }) {
   }, [error]);
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-background px-4">
-      <div className="max-w-md text-center">
-        <h1 className="text-xl font-semibold tracking-tight text-foreground">
-          This page didn't load
-        </h1>
-        <p className="mt-2 text-sm text-muted-foreground">
-          Something went wrong on our end. You can try refreshing or head back
-          home.
+    <div className="not-found">
+      <div className="not-found-card">
+        <div className="not-found-number">ERR</div>
+        <h1 className="not-found-title">The arena dropped a connection.</h1>
+        <p className="not-found-copy">
+          Something went wrong while loading this page. You can try the room
+          again or return to the front desk.
         </p>
-        <div className="mt-6 flex flex-wrap justify-center gap-2">
+        <div className="not-found-actions">
           <button
+            type="button"
             onClick={() => {
               router.invalidate();
               reset();
             }}
-            className="inline-flex items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+            className="button-primary"
           >
             Try again
           </button>
-          <a
-            href="/"
-            className="inline-flex items-center justify-center rounded-md border border-input bg-background px-4 py-2 text-sm font-medium text-foreground transition-colors hover:bg-accent"
-          >
+          <a href="/" className="button-secondary">
             Go home
           </a>
         </div>
@@ -101,7 +95,6 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
           rel: "stylesheet",
           href: appCss,
         },
-        // Lato is self-hosted in public/fonts and declared in styles.css.
         { rel: "icon", href: "/favicon.svg", type: "image/svg+xml" },
       ],
     }),
@@ -131,10 +124,10 @@ function RootComponent() {
 
   return (
     <QueryClientProvider client={queryClient}>
-      {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
       <AppShell>
         <Outlet />
       </AppShell>
+      <Toaster />
     </QueryClientProvider>
   );
 }

@@ -93,6 +93,68 @@ export type StartMatchResponse = {
   status: string;
 };
 
+/** `ForkMatchRequest` — body for `POST /api/v1/matches/fork`. */
+export type ForkMatchRequest = {
+  /** The finished match whose state is captured. */
+  parent_match_id: string;
+  /** Branch point; snapped forward to the end of its tool-call batch. */
+  match_event_id: string;
+};
+
+/**
+ * `ForkSchema` — one saved fork: a checkpoint a new match can be started from.
+ *
+ * A fork carries no models and never runs. The backend rebuilds its sandbox
+ * snapshot and each agent's conversation, then flips `status` to `ready`.
+ */
+export type ForkSchema = {
+  id: string;
+  parent_match_id: string;
+  /** The effective branch point, after snapping to a model response's end. */
+  branch_event_id: string;
+  branch_event_timestamp: string;
+  /** `pending` while rebuilding, then `ready` or `failed`. */
+  status: string;
+  created_at: string;
+};
+
+/** `ForkDetailSchema` — a fork plus everything the fork page starts a match from. */
+export type ForkDetailSchema = ForkSchema & {
+  challenge_id: string;
+  /** The parent match's models, offered as the picker's starting point. */
+  prisoner_model: string | null;
+  warden_model: string | null;
+  /** The tool-call history behind the branch point. */
+  latest_turns: MatchEventSchema[];
+  /**
+   * Each agent's stored conversation, cut at the branch point, as pydantic-ai
+   * message dumps. `null` for rows recorded before conversations were kept.
+   */
+  prisoner_messages: JsonObject[] | null;
+  warden_messages: JsonObject[] | null;
+};
+
+/** `ForkListResponse` — one page of saved forks, newest first. */
+export type ForkListResponse = PaginationMeta & {
+  items: ForkSchema[];
+};
+
+/**
+ * `StartForkMatchRequest` — body for `POST /api/v1/matches/start-from-fork`.
+ *
+ * The same choices as `start-match`, except the challenge and the resumed state
+ * come from the fork instead of the caller.
+ */
+export type StartForkMatchRequest = {
+  fork_id: string;
+  prisoner_model: string;
+  warden_model: string;
+  prisoner_suggestions: string | null;
+  warden_suggestions: string | null;
+  prisoner_api_key: string | null;
+  warden_api_key: string | null;
+};
+
 /** `PaginationMeta` — paging envelope shared by list responses. */
 export type PaginationMeta = {
   page: number;

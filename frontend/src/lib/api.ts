@@ -9,12 +9,17 @@ import type {
   AvailableModelsResponse,
   ChallengeSchema,
   ChallengeSummary,
+  ForkDetailSchema,
+  ForkListResponse,
+  ForkMatchRequest,
+  ForkSchema,
   MatchEventListResponse,
   MatchEventSchema,
   MatchListResponse,
   MatchListSchema,
   SortOrder,
   SpectateEvent,
+  StartForkMatchRequest,
   StartMatchRequest,
   StartMatchResponse,
 } from "./dto";
@@ -79,6 +84,69 @@ export function startMatch(
   payload: StartMatchRequest,
 ): Promise<StartMatchResponse> {
   return request<StartMatchResponse>("/api/v1/matches/start-match", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+/**
+ * `POST /api/v1/matches/fork` — save a fork point on a finished match.
+ *
+ * This only starts the fork *creation* process: the backend creates a checkpoint
+ * row, queues the rebuild of its sandbox snapshot and the two conversations, and
+ * returns `202`. No match is started and no models or keys are involved — a new
+ * match is started from the fork later via `startFromFork`.
+ */
+export function forkMatch(payload: ForkMatchRequest): Promise<ForkSchema> {
+  return request<ForkSchema>("/api/v1/matches/fork", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+/**
+ * `GET /api/v1/matches/forks` — one page of saved forks, newest first.
+ *
+ * Omit `matchId` for every saved fork, which is what the forks tab shows.
+ */
+export function listForks({
+  matchId,
+  page = 1,
+  pageSize = 20,
+}: { matchId?: string } & ListPageParams = {}): Promise<ForkListResponse> {
+  const query = new URLSearchParams({
+    page: String(page),
+    page_size: String(pageSize),
+  });
+  if (matchId !== undefined && matchId !== "") {
+    query.set("match_id", matchId);
+  }
+  return request<ForkListResponse>(`/api/v1/matches/forks?${query}`);
+}
+
+/**
+ * `GET /api/v1/matches/fork?fork_id=...` — one fork with the state a match is
+ * started from: the challenge, the parent's models, the turns behind the branch
+ * point, and each agent's conversation up to there.
+ */
+export function getFork(forkId: string): Promise<ForkDetailSchema> {
+  const query = new URLSearchParams({ fork_id: forkId });
+  return request<ForkDetailSchema>(`/api/v1/matches/fork?${query}`);
+}
+
+/**
+ * `POST /api/v1/matches/start-from-fork` — queue a new match from a saved fork.
+ *
+ * The fork supplies the challenge, the sandbox state and the conversation each
+ * agent resumes from; the body supplies the models, tips and keys, so the same
+ * fork can back any number of experiments.
+ */
+export function startFromFork(
+  payload: StartForkMatchRequest,
+): Promise<StartMatchResponse> {
+  return request<StartMatchResponse>("/api/v1/matches/start-from-fork", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),

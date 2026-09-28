@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as ChallengesRouteImport } from './routes/challenges'
+import { Route as ForksRouteImport } from './routes/forks'
 import { Route as LaunchRouteImport } from './routes/launch'
 import { Route as LeaderboardRouteImport } from './routes/leaderboard'
 import { Route as MatchesRouteImport } from './routes/matches'
@@ -25,6 +26,11 @@ const IndexRoute = IndexRouteImport.update({
 const ChallengesRoute = ChallengesRouteImport.update({
   id: '/challenges',
   path: '/challenges',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ForksRoute = ForksRouteImport.update({
+  id: '/forks',
+  path: '/forks',
   getParentRoute: () => rootRouteImport,
 } as any)
 const LaunchRoute = LaunchRouteImport.update({
@@ -56,6 +62,7 @@ const MatchesMatchIdRoute = MatchesMatchIdRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/challenges': typeof ChallengesRoute
+  '/forks': typeof ForksRoute
   '/launch': typeof LaunchRoute
   '/leaderboard': typeof LeaderboardRoute
   '/matches': typeof MatchesRouteWithChildren
@@ -65,6 +72,7 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/challenges': typeof ChallengesRoute
+  '/forks': typeof ForksRoute
   '/launch': typeof LaunchRoute
   '/leaderboard': typeof LeaderboardRoute
   '/matches/$matchId': typeof MatchesMatchIdRoute
@@ -74,6 +82,7 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/challenges': typeof ChallengesRoute
+  '/forks': typeof ForksRoute
   '/launch': typeof LaunchRoute
   '/leaderboard': typeof LeaderboardRoute
   '/matches': typeof MatchesRouteWithChildren
@@ -85,6 +94,7 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/challenges'
+    | '/forks'
     | '/launch'
     | '/leaderboard'
     | '/matches'
@@ -94,6 +104,7 @@ export interface FileRouteTypes {
   to:
     | '/'
     | '/challenges'
+    | '/forks'
     | '/launch'
     | '/leaderboard'
     | '/matches/$matchId'
@@ -102,6 +113,7 @@ export interface FileRouteTypes {
     | '__root__'
     | '/'
     | '/challenges'
+    | '/forks'
     | '/launch'
     | '/leaderboard'
     | '/matches'
@@ -112,6 +124,7 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   ChallengesRoute: typeof ChallengesRoute
+  ForksRoute: typeof ForksRoute
   LaunchRoute: typeof LaunchRoute
   LeaderboardRoute: typeof LeaderboardRoute
   MatchesRoute: typeof MatchesRouteWithChildren
@@ -131,6 +144,13 @@ declare module '@tanstack/react-router' {
       path: '/challenges'
       fullPath: '/challenges'
       preLoaderRoute: typeof ChallengesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/forks': {
+      id: '/forks'
+      path: '/forks'
+      fullPath: '/forks'
+      preLoaderRoute: typeof ForksRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/launch': {
@@ -187,6 +207,7 @@ const MatchesRouteWithChildren =
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   ChallengesRoute: ChallengesRoute,
+  ForksRoute: ForksRoute,
   LaunchRoute: LaunchRoute,
   LeaderboardRoute: LeaderboardRoute,
   MatchesRoute: MatchesRouteWithChildren,

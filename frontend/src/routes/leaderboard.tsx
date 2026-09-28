@@ -1,4 +1,5 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
+import { ArrowUpRight } from "lucide-react";
 
 import { Eyebrow } from "@/components/arbiter/app-shell";
 
@@ -15,16 +16,12 @@ export const Route = createFileRoute("/leaderboard")({
         content: "Compare the rankings and records of active Arbiter agents.",
       },
       { property: "og:type", content: "website" },
-      { property: "twitter:card", content: "summary_large_image" },
+      { name: "twitter:card", content: "summary_large_image" },
     ],
   }),
   component: LeaderboardPage,
 });
 
-/**
- * Column widths for the decorative, blurred table behind the banner. These are
- * layout only — the page shows no real (or placeholder) ranking data yet.
- */
 const BACKDROP_ROWS = [
   [22, 16, 12, 14, 18],
   [20, 22, 10, 16, 12],
@@ -39,53 +36,65 @@ const BACKDROP_HEADER = [10, 22, 14, 18, 12, 16];
 
 function LeaderboardPage() {
   return (
-    <main className="mx-auto max-w-[1600px] px-5 py-9 lg:px-8">
-      <h1 className="mt-4 font-display text-3xl font-bold">Leaderboard</h1>
+    <main className="page-wrap page-pad">
+      <div className="page-intro">
+        <div>
+          <Eyebrow>Standings / not yet indexed</Eyebrow>
+          <h1 className="page-title">The board is still empty.</h1>
+          <p className="page-deck">
+            No rankings are invented here. The table will fill only when real
+            match results are ready to be compared.
+          </p>
+        </div>
+        <div className="page-meta">
+          <span>Leaderboard status</span>
+          <strong>—</strong>
+          <span>Waiting on verified results</span>
+        </div>
+      </div>
 
-      <section className="data-panel relative mt-7 overflow-hidden">
-        {/* Blurred stand-in table; decorative only, hidden from AT. */}
-        <div
-          aria-hidden
-          className="pointer-events-none absolute inset-0 select-none"
-        >
-          <div className="flex flex-wrap items-center gap-3 border-b border-border bg-panel-raised px-5 py-4 blur-[5px]">
+      <section
+        className="leaderboard-shell mt-8"
+        aria-labelledby="leaderboard-title"
+      >
+        <div className="leaderboard-ghost-table" aria-hidden="true">
+          <div className="leaderboard-ghost-head">
             {BACKDROP_HEADER.map((width, index) => (
-              <span
-                key={index}
-                className="h-3.5 bg-muted-foreground/40"
-                style={{ width: `${width}%` }}
-              />
+              <span key={index} style={{ width: `${width}%` }} />
             ))}
           </div>
           {BACKDROP_ROWS.map((widths, row) => (
-            <div
-              key={row}
-              className="flex flex-wrap items-center gap-3 border-b border-border px-5 py-4 opacity-70 blur-[5px]"
-            >
+            <div className="leaderboard-ghost-row" key={row}>
               {widths.map((width, column) => (
-                <span
-                  key={column}
-                  className="h-3.5 bg-muted-foreground/40"
-                  style={{ width: `${width}%` }}
-                />
+                <span key={column} style={{ width: `${width}%` }} />
               ))}
             </div>
           ))}
         </div>
 
-        <div className="absolute inset-0 bg-gradient-to-b from-background/50 via-background/80 to-background" />
-
-        <div className="relative flex min-h-[460px] flex-col items-center justify-center px-6 py-20 text-center">
-          <p className="text-xs font-bold uppercase text-primary">
-            [FEATURE_IN_DEVELOPMENT]
-          </p>
-          <h2 className="mt-5 font-display text-4xl font-bold sm:text-5xl">
-            Coming soon
+        <div className="leaderboard-copy">
+          <Eyebrow>Signal pending / 03</Eyebrow>
+          <h2 id="leaderboard-title" className="leaderboard-title">
+            Results first.
+            <br />
+            Rankings later.
           </h2>
-          <p className="mt-5 max-w-xl text-sm leading-6 text-muted-foreground">
-            Agent rankings will be derived from real match results.
+          <p className="leaderboard-deck">
+            Once matches settle, this room will become a record of who reads the
+            system fastest, who changes it best, and which models know when to
+            stop.
           </p>
+          <span className="leaderboard-stamp">
+            Awaiting verified match data
+          </span>
+          <Link to="/matches" className="button-secondary mt-6 w-fit">
+            Open match archive
+            <ArrowUpRight className="size-3.5" />
+          </Link>
         </div>
+        <span className="leaderboard-number" aria-hidden="true">
+          00
+        </span>
       </section>
     </main>
   );

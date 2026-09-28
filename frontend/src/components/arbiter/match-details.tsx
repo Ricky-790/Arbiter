@@ -1,150 +1,164 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { X } from "lucide-react";
-import { useMemo } from "react";
+import { lazy, Suspense, useMemo, useState } from "react";
+import { toast } from "sonner";
 
-import { Eyebrow } from "@/components/arbiter/app-shell";
-import { LogLine, type LogTone } from "@/components/arbiter/log-line";
-import { OutcomeBadge } from "@/components/arbiter/match-archive";
+import {
+  EventGroup,
+  type DescribedLine,
+} from "@/components/arbiter/event-group";
+import { OutcomeBadge } from "@/components/arbiter/outcome-badge";
+import { MatchMasthead } from "@/components/arbiter/match-masthead";
 import { Field, FileBlocks, JsonBlock } from "@/components/arbiter/spec-blocks";
-import { Button } from "@/components/ui/button";
-import { getChallenge, getMatch, listAllMatchEvents } from "@/lib/api";
-import type { JsonObject, MatchEventSchema } from "@/lib/dto";
+import { forkMatch, getChallenge, listAllMatchEvents } from "@/lib/api";
+import type { MatchEventSchema, MatchListSchema } from "@/lib/dto";
 import {
   formatArguments,
   formatDateTime,
   formatDuration,
   formatModel,
 } from "@/lib/format";
+import {
+  eventsForActor,
+  groupEventsByBatch,
+  type EventGroup as EventTurn,
+} from "@/lib/match-events";
+import { canFork } from "@/lib/match-status";
 
-type DescribedLine = {
-  text: string;
-  tone: LogTone;
-  label: { text: string; tone: LogTone } | null;
-  detail: JsonObject | null;
-};
+const NO_EVENTS: MatchEventSchema[] = [];
 
 /**
- * `/matches?id=<matchId>`: one match's recorded history.
- *
- * Loads the match to get its `challenge_id`, then the full challenge spec and
- * every persisted event. Prisoner and Warden get a box each; system events
- * (match start/finish, traps, sandbox observations) appear in both, in their
- * own colour, so each column reads as a complete timeline.
+ * The dialog (and the Radix alert-dialog it composes) is only pulled in once
+ * someone actually asks to fork, so the transcript itself does not carry it.
  */
-export function MatchDetails({ matchId }: { matchId: string }) {
-  const matchQuery = useQuery({
-    queryKey: ["match", matchId],
-    queryFn: () => getMatch(matchId),
-  });
+const ForkDialog = lazy(() =>
+  import("@/components/arbiter/fork-dialog").then((module) => ({
+    default: module.ForkDialog,
+  })),
+);
 
-  const challengeId = matchQuery.data?.challenge_id ?? "";
+/**
+ * A settled match's recorded history: the challenge brief plus both agents'
+ * transcripts, grouped into forkable turns.
+ *
+ * `MatchView` only routes here once the row is out of its live statuses, and it
+ * owns the match row itself, so this view fetches just the challenge spec and
+ * the event history.
+ */
+export function MatchDetails({ match }: { match: MatchListSchema }) {
+  const queryClient = useQueryClient();
+  const [forkTarget, setForkTarget] = useState<EventTurn | null>(null);
+
   const challengeQuery = useQuery({
-    queryKey: ["challenge", challengeId],
-    queryFn: () => getChallenge(challengeId),
-    enabled: challengeId !== "",
+    queryKey: ["challenge", match.challenge_id],
+    queryFn: () => getChallenge(match.challenge_id),
   });
 
   const eventsQuery = useQuery({
-    queryKey: ["match-events", matchId],
-    queryFn: () => listAllMatchEvents(matchId),
+    queryKey: ["match-events", match.id],
+    queryFn: () => listAllMatchEvents(match.id),
   });
 
-  const match = matchQuery.data ?? null;
   const challenge = challengeQuery.data ?? null;
-  const events = eventsQuery.data ?? [];
+  const events = eventsQuery.data ?? NO_EVENTS;
 
-  const prisonerEvents = useMemo(
-    () => eventsForActor(events, "prisoner"),
+  const fork = useMutation({
+    mutationFn: (eventId: string) =>
+      forkMatch({ parent_match_id: match.id, match_event_id: eventId }),
+    onSuccess: async (response) => {
+      // A fork is a checkpoint, not a match: nothing runs, so the transcript
+      // stays where it is and the new point is only worth announcing.
+      await queryClient.invalidateQueries({ queryKey: ["forks"] });
+      setForkTarget(null);
+      if (response.status === "ready") {
+        toast.success("Fork point ready", {
+          description: "This point was already saved, so it is ready to run.",
+        });
+      } else {
+        toast.success("Fork point queued", {
+          description:
+            "Rebuilding the sandbox snapshot and both conversations. Find it in the Forks tab when it is ready.",
+        });
+      }
+    },
+    onError: (error) => {
+      toast.error("Could not save the fork point", {
+        description: error instanceof Error ? error.message : "Request failed",
+      });
+    },
+  });
+
+  const prisonerTurns = useMemo(
+    () => groupEventsByBatch(eventsForActor(events, "prisoner")),
     [events],
   );
-  const wardenEvents = useMemo(
-    () => eventsForActor(events, "warden"),
+  const wardenTurns = useMemo(
+    () => groupEventsByBatch(eventsForActor(events, "warden")),
     [events],
   );
+
+  const forkable = canFork(match.status);
 
   return (
     <main>
-      <section className="border-b border-border px-5 py-6 lg:px-8">
-        <div className="mx-auto flex max-w-[1600px] flex-wrap items-end gap-6">
-          <div>
-            <p className="text-[11px] font-bold text-primary">
-              [RECORDED_MATCH_HISTORY]
-            </p>
-            <h1 className="mt-3 break-words font-display text-2xl font-bold sm:text-3xl">
-              {challenge?.name ?? "Match Details"}
-            </h1>
-          </div>
-          {match !== null && (
-            <div className="text-right">
-              <div className="text-[10px] text-muted-foreground">OUTCOME</div>
-              <div className="mt-2">
-                <OutcomeBadge match={match} />
-              </div>
-            </div>
-          )}
-          {match !== null && (
-            <div className="text-right">
-              <div className="text-[10px] text-muted-foreground">DURATION</div>
-              <div className="mt-1 text-sm font-bold text-primary">
-                {formatDuration(match.duration_seconds)}
-              </div>
-            </div>
-          )}
-          {match !== null && (
-            <div className="text-right">
-              <div className="text-[10px] text-muted-foreground">STARTED</div>
-              <div className="mt-1 text-xs text-foreground">
-                {formatDateTime(match.started_at ?? match.created_at)}
-              </div>
-            </div>
-          )}
-          <Button
-            asChild
-            variant="ghost"
-            size="icon"
-            className="ml-auto size-10 rounded-none text-primary hover:bg-transparent hover:text-primary"
+      <MatchMasthead
+        eyebrow={`Recorded match / transcript / ${match.id.slice(0, 8)}`}
+        title={challenge?.name ?? "Match details"}
+        status={
+          <Link
+            to="/matches"
+            aria-label="Close match details"
+            className="match-close"
           >
-            <Link to="/matches" aria-label="Close match details">
-              <X className="size-6" strokeWidth={3} />
-            </Link>
-          </Button>
-        </div>
-
-        {matchQuery.isError && (
-          <p className="mx-auto mt-4 max-w-[1600px] text-sm text-destructive">
-            FAILED TO LOAD MATCH: {(matchQuery.error as Error).message}
-          </p>
-        )}
-      </section>
+            <X className="size-4" />
+          </Link>
+        }
+        metrics={[
+          { label: "Outcome", value: <OutcomeBadge match={match} /> },
+          {
+            label: "Duration",
+            value: formatDuration(match.duration_seconds),
+            signal: true,
+          },
+          {
+            label: "Started",
+            value: formatDateTime(match.started_at ?? match.created_at),
+          },
+          { label: "Match ID", value: match.id },
+        ]}
+        error={
+          challengeQuery.isError ? (
+            <p className="match-error">
+              Failed to load challenge:{" "}
+              {(challengeQuery.error as Error).message}
+            </p>
+          ) : undefined
+        }
+      />
 
       {challenge !== null && (
-        <section className="border-b border-border bg-panel px-5 py-6 lg:px-8">
-          <div className="mx-auto max-w-[1600px]">
-            <div className="flex flex-wrap items-baseline gap-3">
-              <span className="text-[11px] text-muted-foreground">
-                TYPE:{" "}
-                <span className="text-primary">{challenge.challenge_type}</span>
+        <section className="challenge-detail-band">
+          <div className="page-wrap">
+            <div className="challenge-detail-top">
+              <span>
+                Type / <strong>{challenge.challenge_type}</strong>
               </span>
-              {match !== null && (
-                <span className="ml-auto text-[11px] text-muted-foreground">
-                  {formatModel(match.prisoner_provider, match.prisoner_model)}{" "}
-                  vs {formatModel(match.warden_provider, match.warden_model)}
-                </span>
-              )}
+              <span>
+                {formatModel(match.prisoner_provider, match.prisoner_model)} vs{" "}
+                {formatModel(match.warden_provider, match.warden_model)}
+              </span>
             </div>
 
-            <div className="mt-3 grid gap-x-8 lg:grid-cols-2">
+            <div className="challenge-detail-grid">
               <div>
                 <Field label="DESCRIPTION">
-                  <p className="text-xs leading-5 text-muted-foreground">
+                  <p className="text-muted-foreground">
                     {challenge.description}
                   </p>
                 </Field>
                 <Field label="WIN_CONDITION">
-                  <p className="text-xs leading-5 text-foreground">
-                    {challenge.win_condition}
-                  </p>
+                  <p>{challenge.win_condition}</p>
                 </Field>
                 <Field label="FLAG_STRUCTURE">
                   <JsonBlock value={challenge.flag_structure} />
@@ -163,47 +177,67 @@ export function MatchDetails({ matchId }: { matchId: string }) {
         </section>
       )}
 
-      {challengeQuery.isError && (
-        <p className="mx-auto max-w-[1600px] px-5 pt-6 text-sm text-destructive lg:px-8">
-          FAILED TO LOAD CHALLENGE: {(challengeQuery.error as Error).message}
-        </p>
-      )}
-
       {eventsQuery.isPending && (
-        <p className="mx-auto max-w-[1600px] px-5 py-10 text-sm text-muted-foreground lg:px-8">
-          LOADING MATCH EVENTS...
-        </p>
+        <p className="loading-line page-wrap py-10">Loading match events...</p>
       )}
 
       {eventsQuery.isError && (
-        <p className="mx-auto max-w-[1600px] px-5 py-10 text-sm text-destructive lg:px-8">
-          FAILED TO LOAD EVENTS: {(eventsQuery.error as Error).message}
+        <p className="error-line page-wrap py-10">
+          Failed to load events: {(eventsQuery.error as Error).message}
         </p>
       )}
 
       {!eventsQuery.isPending && !eventsQuery.isError && (
-        <section className="mx-auto grid max-w-[1600px] gap-5 px-5 py-8 lg:grid-cols-2 lg:px-8">
-          <EventBox
-            title="PRISONER_AGENT"
-            role="ATTACKER ROLE"
-            model={
-              match === null
-                ? ""
-                : formatModel(match.prisoner_provider, match.prisoner_model)
-            }
-            events={prisonerEvents}
-          />
-          <EventBox
-            title="WARDEN_AGENT"
-            role="DEFENDER ROLE"
-            model={
-              match === null
-                ? ""
-                : formatModel(match.warden_provider, match.warden_model)
-            }
-            events={wardenEvents}
-          />
+        <section className="page-wrap event-section">
+          <div className="event-grid">
+            <EventBox
+              title="PRISONER_AGENT"
+              role="Attacker role"
+              tone="prisoner"
+              model={formatModel(match.prisoner_provider, match.prisoner_model)}
+              turns={prisonerTurns}
+              forkable={forkable}
+              selectedKey={forkTarget?.key ?? null}
+              forking={fork.isPending}
+              onFork={(group) => {
+                fork.reset();
+                setForkTarget(group);
+              }}
+            />
+            <EventBox
+              title="WARDEN_AGENT"
+              role="Defender role"
+              tone="warden"
+              model={formatModel(match.warden_provider, match.warden_model)}
+              turns={wardenTurns}
+              forkable={forkable}
+              selectedKey={forkTarget?.key ?? null}
+              forking={fork.isPending}
+              onFork={(group) => {
+                fork.reset();
+                setForkTarget(group);
+              }}
+            />
+          </div>
         </section>
+      )}
+
+      {forkTarget !== null && (
+        <Suspense fallback={null}>
+          <ForkDialog
+            open
+            parentMatchId={match.id}
+            group={forkTarget}
+            pending={fork.isPending}
+            error={fork.error instanceof Error ? fork.error.message : null}
+            onOpenChange={(open) => {
+              if (!open && !fork.isPending) setForkTarget(null);
+            }}
+            onConfirm={() => {
+              if (forkTarget !== null) fork.mutate(forkTarget.forkEventId);
+            }}
+          />
+        </Suspense>
       )}
     </main>
   );
@@ -212,74 +246,54 @@ export function MatchDetails({ matchId }: { matchId: string }) {
 function EventBox({
   title,
   role,
+  tone,
   model,
-  events,
+  turns,
+  forkable,
+  selectedKey,
+  forking,
+  onFork,
 }: {
   title: string;
   role: string;
+  tone: "prisoner" | "warden";
   model: string;
-  events: MatchEventSchema[];
+  turns: EventTurn[];
+  forkable: boolean;
+  /** Group key currently open in the fork dialog, highlighted in full. */
+  selectedKey: string | null;
+  forking: boolean;
+  onFork: (group: EventTurn) => void;
 }) {
   return (
-    <section className="data-panel border-b-primary">
-      <header className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-border bg-panel-raised px-4 py-4 text-xs font-bold">
-        <span className="text-primary">{title}</span>
-        {model !== "" && (
-          <span className="break-all text-muted-foreground">{model}</span>
-        )}
-        <span className="ml-auto text-[11px] text-muted-foreground">
-          {role}
-        </span>
+    <section className={`event-panel ${tone}`}>
+      <header className="event-panel-header">
+        <span className="event-panel-name">{title}</span>
+        {model !== "" && <span className="event-panel-model">{model}</span>}
+        <span className="event-panel-role">{role}</span>
       </header>
-      <div className="event-scroll h-[560px] space-y-3 overflow-y-auto border-l border-primary p-4 text-sm text-foreground sm:p-5">
-        {events.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            NO EVENTS RECORDED FOR THIS MATCH.
-          </p>
+      <div className="event-stream event-scroll">
+        {turns.length === 0 ? (
+          <p className="event-empty">No events recorded for this match.</p>
         ) : (
-          events.map((event) => {
-            const line = describePersistedEvent(event);
-            return (
-              <LogLine
-                key={event.id}
-                time={formatTime(event.timestamp)}
-                text={line.text}
-                tone={line.tone}
-                label={line.label}
-                detail={line.detail}
-              />
-            );
-          })
+          turns.map((group) => (
+            <EventGroup
+              key={group.key}
+              group={group}
+              describe={describePersistedEvent}
+              forkable={forkable}
+              forkBlockedReason="Forking unlocks once the match has settled."
+              selected={group.key === selectedKey}
+              forking={forking}
+              onFork={onFork}
+            />
+          ))
         )}
       </div>
     </section>
   );
 }
 
-/** Actor events plus the system events, interleaved chronologically. */
-function eventsForActor(
-  events: MatchEventSchema[],
-  actor: string,
-): MatchEventSchema[] {
-  return events
-    .filter((event) => event.actor === actor || isSystemEvent(event))
-    .sort((a, b) => eventTime(a) - eventTime(b));
-}
-
-function isSystemEvent(event: MatchEventSchema): boolean {
-  return event.actor !== "prisoner" && event.actor !== "warden";
-}
-
-function eventTime(event: MatchEventSchema): number {
-  const parsed = new Date(event.timestamp).getTime();
-  return Number.isNaN(parsed) ? 0 : parsed;
-}
-
-/**
- * Render one persisted `match_events` row. Persisted `event_type` values are
- * the database vocabulary, not the live SSE types. `detail` is what the RESULT
- * toggle expands; the text only ever states the outcome.
- */
 function describePersistedEvent(event: MatchEventSchema): DescribedLine {
   const action = event.action;
   const result = event.result ?? {};
@@ -399,10 +413,4 @@ function booleanValue(value: unknown): boolean | null {
 
 function numberValue(value: unknown): number | null {
   return typeof value === "number" ? value : null;
-}
-
-function formatTime(timestamp: string): string {
-  const parsed = new Date(timestamp);
-  if (Number.isNaN(parsed.getTime())) return "--:--:--";
-  return parsed.toLocaleTimeString([], { hour12: false });
 }

@@ -1,21 +1,13 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useState } from "react";
+import { ArrowLeft, ArrowUpRight } from "lucide-react";
+import { toast } from "sonner";
 
+import { AgentSeatPicker } from "@/components/arbiter/agent-seat-picker";
 import { Eyebrow } from "@/components/arbiter/app-shell";
-import { Button } from "@/components/ui/button";
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectLabel,
-  SelectSeparator,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { getChallenge, listModels, startMatch } from "@/lib/api";
 import type { AvailableModelsResponse } from "@/lib/dto";
+import { useAgentSeats } from "@/lib/use-agent-seats";
 
 export const Route = createFileRoute("/launch")({
   validateSearch: (
@@ -36,7 +28,7 @@ export const Route = createFileRoute("/launch")({
         content: "Pick the Prisoner and Warden models for a new Arbiter match.",
       },
       { property: "og:type", content: "website" },
-      { property: "twitter:card", content: "summary_large_image" },
+      { name: "twitter:card", content: "summary_large_image" },
     ],
   }),
   component: LaunchPage,
@@ -45,12 +37,6 @@ export const Route = createFileRoute("/launch")({
 function LaunchPage() {
   const navigate = useNavigate();
   const { challengeId = "" } = Route.useSearch();
-  const [prisonerModel, setPrisonerModel] = useState("");
-  const [wardenModel, setWardenModel] = useState("");
-  const [prisonerSuggestions, setPrisonerSuggestions] = useState("");
-  const [wardenSuggestions, setWardenSuggestions] = useState("");
-  const [prisonerApiKey, setPrisonerApiKey] = useState("");
-  const [wardenApiKey, setWardenApiKey] = useState("");
 
   const modelsQuery = useQuery({
     queryKey: ["free-models"],
@@ -67,301 +53,208 @@ function LaunchPage() {
     free_models: [],
     byok_models: [],
   };
-  const byokModels = new Set(models.byok_models);
-  const prisonersNeedsKey = byokModels.has(prisonerModel);
-  const wardenNeedsKey = byokModels.has(wardenModel);
-
-  /** Selecting a free model drops any key typed for the previous choice. */
-  const chooseModel = (
-    next: string,
-    setModel: (value: string) => void,
-    setApiKey: (value: string) => void,
-  ) => {
-    setModel(next);
-    if (!byokModels.has(next)) setApiKey("");
-  };
+  const { seats, ready, choose, setApiKey, setSuggestions } =
+    useAgentSeats(models);
 
   const launch = useMutation({
     mutationFn: () =>
       startMatch({
         challenge_id: challengeId,
-        prisoner_model: prisonerModel,
-        warden_model: wardenModel,
-        prisoner_suggestions: prisonerSuggestions.trim() || null,
-        warden_suggestions: wardenSuggestions.trim() || null,
-        // Only ever sent for the side that needs it; a free model runs on the
-        // deployment's own key.
-        prisoner_api_key: prisonersNeedsKey ? prisonerApiKey.trim() : null,
-        warden_api_key: wardenNeedsKey ? wardenApiKey.trim() : null,
+        prisoner_model: seats.prisoner.model,
+        warden_model: seats.warden.model,
+        prisoner_suggestions: seats.prisoner.suggestions.trim() || null,
+        warden_suggestions: seats.warden.suggestions.trim() || null,
+        prisoner_api_key: seats.prisoner.needsKey
+          ? seats.prisoner.apiKey.trim()
+          : null,
+        warden_api_key: seats.warden.needsKey
+          ? seats.warden.apiKey.trim()
+          : null,
       }),
     onSuccess: (response) => {
+      toast.success("Match queued", {
+        description: "Waiting for a worker to pick it up.",
+      });
       navigate({
-        to: "/matches/$matchId",
-        params: { matchId: response.match_id },
-        search: {
-          prisoner: prisonerModel,
-          warden: wardenModel,
-          challenge: challengeQuery.data?.name ?? "",
-        },
+        to: "/matches",
+        search: { match_id: response.match_id },
+      });
+    },
+    onError: (error) => {
+      toast.error("Could not start the match", {
+        description: error instanceof Error ? error.message : "Request failed",
       });
     },
   });
 
   const challenge = challengeQuery.data ?? null;
-  const ready =
-    challengeId !== "" &&
-    prisonerModel !== "" &&
-    wardenModel !== "" &&
-    prisonerModel !== wardenModel &&
-    (!prisonersNeedsKey || prisonerApiKey.trim() !== "") &&
-    (!wardenNeedsKey || wardenApiKey.trim() !== "") &&
-    !launch.isPending;
+  const launchReady = ready && !launch.isPending;
 
   if (challengeId === "") {
     return (
-      <main className="mx-auto max-w-3xl px-5 py-16 lg:px-8">
-        <Eyebrow>LAUNCH_MATCH</Eyebrow>
-        <h1 className="mt-4 font-display text-3xl font-bold">
-          No challenge selected
-        </h1>
-        <p className="mt-3 text-sm text-muted-foreground">
-          Open a challenge from the repository and press LAUNCH ADVERSARIAL
-          MATCH.
-        </p>
-        <Button asChild className="mt-7 rounded-none">
-          <Link to="/challenges">BACK TO CHALLENGES</Link>
-        </Button>
+      <main className="page-wrap page-pad">
+        <div className="page-intro">
+          <div>
+            <Eyebrow>Launch sequence / waiting room</Eyebrow>
+            <h1 className="page-title">No arena selected.</h1>
+            <p className="page-deck">
+              Open a challenge brief first. Once you choose the room, this is
+              where the two models take their seats.
+            </p>
+            <Link to="/challenges" className="button-primary mt-7">
+              <ArrowLeft className="size-3.5" />
+              Return to challenges
+            </Link>
+          </div>
+          <div className="page-meta">
+            <span>Sequence status</span>
+            <strong>00</strong>
+            <span>Awaiting scenario</span>
+          </div>
+        </div>
       </main>
     );
   }
 
   return (
-    <main className="mx-auto max-w-3xl px-5 py-12 lg:px-8">
-      {/*<Eyebrow>LAUNCH_MATCH</Eyebrow>*/}
-      <h1 className="mt-4 font-display text-3xl font-bold">Select Agents</h1>
-      <p className="mt-3 text-sm text-muted-foreground">
-        Choose one model per side.
-      </p>
-
-      <div className="data-panel mt-7 p-5">
-        {challengeQuery.isPending && (
-          <p className="mt-3 text-sm text-muted-foreground">LOADING...</p>
-        )}
-        {challengeQuery.isError && (
-          <p className="mt-3 text-sm text-destructive">
-            FAILED TO LOAD CHALLENGE: {(challengeQuery.error as Error).message}
-          </p>
-        )}
-        {challenge !== null && (
-          <div className="mt-3">
-            <div className="text-md font-bold">{challenge.name}</div>
-            <p className="mt-2 text-md leading-5 text-muted-foreground">
-              {challenge.description}
-            </p>
-            <p className="mt-3 text-[11px] text-primary">
-              WIN: {challenge.win_condition}
-            </p>
-          </div>
-        )}
-      </div>
-
-      <div className="mt-5 grid gap-5 sm:grid-cols-2">
-        <ModelSelect
-          label="PRISONER"
-          hint="Attacker"
-          value={prisonerModel}
-          onChange={(next) =>
-            chooseModel(next, setPrisonerModel, setPrisonerApiKey)
-          }
-          models={models}
-          excluded={wardenModel}
-          loading={modelsQuery.isPending}
-          suggestions={prisonerSuggestions}
-          onSuggestionsChange={setPrisonerSuggestions}
-          needsKey={prisonersNeedsKey}
-          apiKey={prisonerApiKey}
-          onApiKeyChange={setPrisonerApiKey}
-        />
-        <ModelSelect
-          label="WARDEN"
-          hint="Defender"
-          value={wardenModel}
-          onChange={(next) =>
-            chooseModel(next, setWardenModel, setWardenApiKey)
-          }
-          models={models}
-          excluded={prisonerModel}
-          loading={modelsQuery.isPending}
-          suggestions={wardenSuggestions}
-          onSuggestionsChange={setWardenSuggestions}
-          needsKey={wardenNeedsKey}
-          apiKey={wardenApiKey}
-          onApiKeyChange={setWardenApiKey}
-        />
-      </div>
-
-      {modelsQuery.isError && (
-        <p className="mt-5 text-sm text-destructive">
-          FAILED TO LOAD MODELS: {(modelsQuery.error as Error).message}
-        </p>
-      )}
-
-      {prisonerModel !== "" && prisonerModel === wardenModel && (
-        <p className="mt-5 text-sm text-destructive">
-          PRISONER AND WARDEN CANNOT USE THE SAME MODEL.
-        </p>
-      )}
-
-      {launch.isError && (
-        <p className="mt-5 text-sm text-destructive">
-          FAILED TO START MATCH: {(launch.error as Error).message}
-        </p>
-      )}
-
-      <div className="mt-7 flex flex-wrap gap-3">
-        <Button
-          onClick={() => launch.mutate()}
-          disabled={!ready}
-          className="h-12 rounded-none px-6 font-mono text-sm font-bold"
-        >
-          {launch.isPending ? "QUEUEING MATCH..." : "START MATCH"}
-        </Button>
-        <Button asChild variant="secondary" className="h-12 rounded-none">
-          <Link to="/challenges">CANCEL</Link>
-        </Button>
-      </div>
-
-      {launch.isPending && (
-        <p className="mt-4 text-[11px] text-muted-foreground">
-          Queueing on the worker... you will be moved to the live spectate view.
-        </p>
-      )}
-    </main>
-  );
-}
-
-function ModelSelect({
-  label,
-  hint,
-  value,
-  onChange,
-  models,
-  excluded,
-  loading,
-  suggestions,
-  onSuggestionsChange,
-  needsKey,
-  apiKey,
-  onApiKeyChange,
-}: {
-  label: string;
-  hint: string;
-  value: string;
-  onChange: (value: string) => void;
-  models: AvailableModelsResponse;
-  /** The other side's pick, which this side may not repeat. */
-  excluded: string;
-  loading: boolean;
-  suggestions: string;
-  onSuggestionsChange: (value: string) => void;
-  needsKey: boolean;
-  apiKey: string;
-  onApiKeyChange: (value: string) => void;
-}) {
-  const freeModels = models.free_models.filter((model) => model !== excluded);
-  const byokModels = models.byok_models.filter((model) => model !== excluded);
-
-  return (
-    <div className="data-panel p-5">
-      <span className="flex items-baseline justify-between">
-        <span className="text-sm font-bold text-primary">{label}</span>
-        <span className="text-[11px] text-muted-foreground">{hint}</span>
-      </span>
-
-      <Select value={value} onValueChange={onChange} disabled={loading}>
-        <SelectTrigger
-          aria-label={`${label} model`}
-          className="mt-4 h-auto w-full rounded-none border-border bg-background px-3 py-3 text-sm data-[placeholder]:text-muted-foreground"
-        >
-          <SelectValue
-            placeholder={loading ? "LOADING MODELS..." : "SELECT MODEL"}
-          />
-        </SelectTrigger>
-        {/* Capped so the catalogue scrolls instead of running off the screen.
-            The accent scrollbar lives on the viewport (see ui/select.tsx). */}
-        <SelectContent className="max-h-[min(18rem,var(--radix-select-content-available-height))] rounded-none border-border bg-panel">
-          <SelectGroup>
-            <SelectLabel className="font-mono text-[10px] uppercase text-muted-foreground">
-              FREE MODELS
-            </SelectLabel>
-            <SelectSeparator className="bg-border" />
-            {freeModels.map((model) => (
-              <SelectItem
-                key={model}
-                value={model}
-                className="cursor-pointer rounded-none text-sm"
-              >
-                {model}
-              </SelectItem>
-            ))}
-          </SelectGroup>
-          <SelectSeparator className="bg-border" />
-          <SelectGroup>
-            <SelectLabel className="font-mono text-[10px] uppercase text-primary">
-              BYOK MODELS
-            </SelectLabel>
-            <SelectSeparator className="bg-border" />
-            {byokModels.map((model) => (
-              <SelectItem
-                key={model}
-                value={model}
-                className="cursor-pointer rounded-none text-sm"
-              >
-                {model}
-              </SelectItem>
-            ))}
-          </SelectGroup>
-        </SelectContent>
-      </Select>
-
-      {/* A BYOK model runs on the player's own key, so ask for it inline. */}
-      {needsKey && (
-        <div className="mt-3">
-          <label
-            htmlFor={`${label}-api-key`}
-            className="text-[10px] text-muted-foreground"
-          >
-            {label} API KEY
-          </label>
-          <input
-            id={`${label}-api-key`}
-            type="password"
-            value={apiKey}
-            onChange={(event) => onApiKeyChange(event.target.value)}
-            placeholder="Paste your provider API key"
-            autoComplete="off"
-            spellCheck={false}
-            aria-label={`${label} API key`}
-            className="mt-1 w-full border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground"
-          />
-          <p className="mt-1 text-[10px] text-muted-foreground">
-            Used for this match only.
+    <main className="page-wrap page-pad">
+      <div className="page-intro">
+        <div>
+          <Eyebrow>Launch sequence / seat assignment</Eyebrow>
+          <h1 className="page-title">Choose the two minds.</h1>
+          <p className="page-deck">
+            Assign one model to the Prisoner seat and one to the Warden seat.
+            They must be different models; the room will supply the rest.
           </p>
         </div>
-      )}
+        <div className="page-meta">
+          <span>Match protocol</span>
+          <strong>02</strong>
+          <span>Seats / tools / clock</span>
+        </div>
+      </div>
 
-      {/* Shown only once a model is chosen, so the form stays compact. */}
-      {value !== "" && (
-        <textarea
-          value={suggestions}
-          onChange={(event) => onSuggestionsChange(event.target.value)}
-          placeholder="Any suggestions for the agent..."
-          rows={3}
-          maxLength={2000}
-          aria-label={`${label} suggestions`}
-          className="mt-3 w-full resize-y border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground"
-        />
-      )}
-    </div>
+      <div className="launch-layout mt-8">
+        <aside className="launch-aside">
+          <Eyebrow>Arena brief</Eyebrow>
+          <h2 className="launch-aside-title">
+            {challenge?.name ?? "Loading arena"}
+          </h2>
+          <p className="launch-aside-copy">
+            {challenge?.description ??
+              "Fetching the selected challenge and its deterministic environment."}
+          </p>
+          <div className="launch-aside-rule" />
+          <div className="launch-aside-meta">
+            <div>
+              <span>Exit condition</span>
+              <strong>{challenge?.win_condition ?? "—"}</strong>
+            </div>
+            <div>
+              <span>Model catalogue</span>
+              <strong>{modelsQuery.isPending ? "Loading" : "Ready"}</strong>
+            </div>
+          </div>
+        </aside>
+
+        <section className="launch-main">
+          <div className="challenge-dossier">
+            <span className="mono-label">Selected scenario / dossier</span>
+            {challengeQuery.isPending && (
+              <p className="loading-line">Loading arena details...</p>
+            )}
+            {challengeQuery.isError && (
+              <p className="error-line">
+                Failed to load challenge:{" "}
+                {(challengeQuery.error as Error).message}
+              </p>
+            )}
+            {challenge !== null && (
+              <>
+                <h2 className="challenge-dossier-title">{challenge.name}</h2>
+                <p className="challenge-dossier-copy">
+                  {challenge.description}
+                </p>
+                <p className="challenge-dossier-win">
+                  Win condition / {challenge.win_condition}
+                </p>
+              </>
+            )}
+          </div>
+
+          <div className="agent-heading">
+            <h2>Seat the agents</h2>
+            <span className="mono-label">Different model required</span>
+          </div>
+          <div className="agent-grid">
+            <AgentSeatPicker
+              side="prisoner"
+              label="PRISONER"
+              hint="Attacker"
+              seat={seats.prisoner}
+              models={models}
+              excluded={seats.warden.model}
+              loading={modelsQuery.isPending}
+              onChoose={(model) => choose("prisoner", model)}
+              onApiKeyChange={(value) => setApiKey("prisoner", value)}
+              onSuggestionsChange={(value) => setSuggestions("prisoner", value)}
+            />
+            <AgentSeatPicker
+              side="warden"
+              label="WARDEN"
+              hint="Defender"
+              seat={seats.warden}
+              models={models}
+              excluded={seats.prisoner.model}
+              loading={modelsQuery.isPending}
+              onChoose={(model) => choose("warden", model)}
+              onApiKeyChange={(value) => setApiKey("warden", value)}
+              onSuggestionsChange={(value) => setSuggestions("warden", value)}
+            />
+          </div>
+
+          {modelsQuery.isError && (
+            <p className="launch-status error">
+              Failed to load models: {(modelsQuery.error as Error).message}
+            </p>
+          )}
+
+          {seats.prisoner.model !== "" &&
+            seats.prisoner.model === seats.warden.model && (
+              <p className="launch-status error">
+                Prisoner and Warden cannot use the same model.
+              </p>
+            )}
+
+          {launch.isError && (
+            <p className="launch-status error">
+              Failed to start match: {(launch.error as Error).message}
+            </p>
+          )}
+
+          <div className="launch-actions">
+            <button
+              type="button"
+              onClick={() => launch.mutate()}
+              disabled={!launchReady}
+              className="button-primary disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {launch.isPending ? "Queueing match..." : "Start match"}
+              <ArrowUpRight className="size-3.5" />
+            </button>
+            <Link to="/challenges" className="button-secondary">
+              Cancel
+            </Link>
+          </div>
+
+          {launch.isPending && (
+            <p className="launch-status">
+              Queueing on the worker... you will be moved to the live spectate
+              view.
+            </p>
+          )}
+        </section>
+      </div>
+    </main>
   );
 }

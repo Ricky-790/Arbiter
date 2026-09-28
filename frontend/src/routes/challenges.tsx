@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { Search, X } from "lucide-react";
+import { ArrowUpRight, Search, X } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { Eyebrow } from "@/components/arbiter/app-shell";
@@ -10,7 +10,6 @@ import {
   JsonBlock,
   TextBlock,
 } from "@/components/arbiter/spec-blocks";
-import { Button } from "@/components/ui/button";
 import { getChallenge, listChallenges } from "@/lib/api";
 import type { ChallengeSchema } from "@/lib/dto";
 
@@ -65,122 +64,132 @@ function ChallengesPage() {
   const selectedSummary =
     (challengesQuery.data ?? []).find((row) => row.id === selectedId) ?? null;
   const selected = detailQuery.data ?? null;
+  const catalogueSize = challengesQuery.data?.length ?? 0;
 
   return (
-    <main>
-      <div className="border-b border-border bg-panel px-5 py-3 lg:px-8">
-        <div className="mx-auto flex max-w-[1600px] flex-wrap items-center gap-2">
-          <label className="relative ml-auto min-w-[250px]">
-            <Search className="absolute left-3 top-2.5 size-3.5 text-muted-foreground" />
+    <main className="page-wrap">
+      <section className="page-pad">
+        <div className="page-intro">
+          <div>
+            <Eyebrow>Arena catalogue / 01</Eyebrow>
+            <h1 className="page-title">Choose your locked room.</h1>
+            <p className="page-deck">
+              Each scenario is a fixed puzzle with a measurable exit. Open a
+              brief, inspect the files, then put two models inside and see what
+              they do under pressure.
+            </p>
+          </div>
+          <div className="page-meta">
+            <span>Scenarios indexed</span>
+            <strong>{catalogueSize.toString().padStart(2, "0")}</strong>
+            <span>Deterministic / sandboxed</span>
+          </div>
+        </div>
+
+        <div className="toolbar mt-8">
+          <span className="mono-label">Filter the catalogue</span>
+          <label className="search-box">
+            <Search aria-hidden="true" />
             <input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="Search challenge..."
-              className="h-9 w-full border border-border bg-background pl-9 pr-3 text-sm text-foreground placeholder:text-muted-foreground"
+              placeholder="Search by name or brief..."
+              aria-label="Search challenges"
             />
           </label>
         </div>
-      </div>
 
-      <div className="mx-auto max-w-[1600px]">
-        <section className="min-h-[calc(100vh-109px)] px-5 py-8 lg:px-8">
-          <h1 className="mt-3 font-display text-3xl font-bold">
-            Available Scenarios
-          </h1>
+        {challengesQuery.isPending && (
+          <p className="loading-line">Reading the arena catalogue...</p>
+        )}
 
-          {challengesQuery.isPending && (
-            <p className="mt-10 text-sm text-muted-foreground">
-              LOADING CHALLENGE...
-            </p>
-          )}
+        {challengesQuery.isError && (
+          <p className="error-line">
+            Failed to load challenges:{" "}
+            {(challengesQuery.error as Error).message}
+          </p>
+        )}
 
-          {challengesQuery.isError && (
-            <p className="mt-10 text-sm text-destructive">
-              FAILED TO LOAD CHALLENGES:{" "}
-              {(challengesQuery.error as Error).message}
-            </p>
-          )}
-
-          <div className="mt-7 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-            {filtered.map((challenge) => (
-              <button
-                key={challenge.id}
-                onClick={() => setSelectedId(challenge.id)}
-                className={`data-panel min-h-52 cursor-pointer p-4 text-left transition-colors hover:border-primary focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary ${
-                  selectedId === challenge.id ? "border-primary" : ""
-                }`}
-              >
-                <h2 className="text-base font-bold">{challenge.name}</h2>
-                <p className="mt-2 text-sm leading-5 text-muted-foreground">
-                  {challenge.description}
-                </p>
-                <p className="mt-4 text-sm leading-5 text-primary">
-                  {challenge.win_condition}
-                </p>
-              </button>
-            ))}
-          </div>
-
-          {!challengesQuery.isPending && filtered.length === 0 && (
-            <p className="mt-10 text-sm text-muted-foreground">
-              NO CHALLENGE VECTORS MATCH THE QUERY.
-            </p>
-          )}
-        </section>
-
-        {selectedId !== null && (
-          <>
+        <div className="challenge-list mt-8">
+          {filtered.map((challenge, index) => (
             <button
               type="button"
-              className="fixed inset-0 z-40 bg-background/70"
-              onClick={() => setSelectedId(null)}
-              aria-label="Close challenge details"
-            />
-            <aside
-              className="drawer-in event-scroll fixed inset-y-0 right-0 z-50 w-full max-w-xl overflow-y-auto border-l border-border bg-panel p-7 shadow-2xl"
-              aria-label="Challenge details"
+              key={challenge.id}
+              onClick={() => setSelectedId(challenge.id)}
+              className={`challenge-row ${
+                selectedId === challenge.id ? "selected" : ""
+              }`}
             >
-              {/*<div className="flex items-center">*/}
-              <div className="flex justify-end">
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  onClick={() => setSelectedId(null)}
-                  className=" size-8 rounded-none py-2"
-                  aria-label="Close challenge details"
-                >
-                  <X className="size-4" />
-                </Button>
-              </div>
+              <span className="challenge-number">
+                {(index + 1).toString().padStart(2, "0")}
+              </span>
+              <span className="challenge-name">{challenge.name}</span>
+              <span className="challenge-description">
+                {challenge.description}
+              </span>
+              <span className="challenge-condition">
+                <span className="text-primary">Exit / </span>
+                {challenge.win_condition}
+              </span>
+              <ArrowUpRight className="challenge-arrow size-4" />
+            </button>
+          ))}
+        </div>
 
-              {detailQuery.isPending && (
-                <p className="mt-6 text-sm text-muted-foreground">
-                  LOADING FULL SPEC...
-                </p>
-              )}
-
-              {detailQuery.isError && (
-                <p className="mt-6 text-sm text-destructive">
-                  FAILED TO LOAD SPEC: {(detailQuery.error as Error).message}
-                </p>
-              )}
-
-              {selected !== null && (
-                <ChallengeDetail
-                  challenge={selected}
-                  fallbackName={selectedSummary?.name ?? selected.name}
-                  onLaunch={() =>
-                    navigate({
-                      to: "/launch",
-                      search: { challengeId: selected.id },
-                    })
-                  }
-                />
-              )}
-            </aside>
-          </>
+        {!challengesQuery.isPending && filtered.length === 0 && (
+          <p className="empty-state">No challenge vectors match the query.</p>
         )}
-      </div>
+      </section>
+
+      {selectedId !== null && (
+        <>
+          <button
+            type="button"
+            className="drawer-backdrop"
+            onClick={() => setSelectedId(null)}
+            aria-label="Close challenge details"
+          />
+          <aside
+            className="challenge-drawer event-scroll"
+            aria-label="Challenge details"
+          >
+            <div className="drawer-topline">
+              <span className="mono-label">Scenario dossier / detail</span>
+              <button
+                type="button"
+                className="drawer-close"
+                onClick={() => setSelectedId(null)}
+                aria-label="Close challenge details"
+              >
+                <X className="size-4" />
+              </button>
+            </div>
+
+            {detailQuery.isPending && (
+              <p className="loading-line">Loading full spec...</p>
+            )}
+
+            {detailQuery.isError && (
+              <p className="error-line">
+                Failed to load spec: {(detailQuery.error as Error).message}
+              </p>
+            )}
+
+            {selected !== null && (
+              <ChallengeDetail
+                challenge={selected}
+                fallbackName={selectedSummary?.name ?? selected.name}
+                onLaunch={() =>
+                  navigate({
+                    to: "/launch",
+                    search: { challengeId: selected.id },
+                  })
+                }
+              />
+            )}
+          </aside>
+        </>
+      )}
     </main>
   );
 }
@@ -199,23 +208,17 @@ function ChallengeDetail({
 
   return (
     <>
-      <h2 className="mt-6 break-words font-display text-3xl font-bold">
-        {challenge.name || fallbackName}
-      </h2>
-      <div className="mt-3 border-b border-border pb-5 text-sm text-muted-foreground">
-        TYPE: <span className="text-primary">{challenge.challenge_type}</span>
-      </div>
+      <h2 className="drawer-title">{challenge.name || fallbackName}</h2>
+      <p className="drawer-type">
+        Type / <strong>{challenge.challenge_type}</strong>
+      </p>
 
       <Field label="WIN_CONDITION">
-        <p className="text-base leading-6 text-foreground">
-          {challenge.win_condition}
-        </p>
+        <p>{challenge.win_condition}</p>
       </Field>
 
       <Field label="DESCRIPTION">
-        <p className="text-base leading-6 text-muted-foreground">
-          {challenge.description}
-        </p>
+        <p className="text-muted-foreground">{challenge.description}</p>
       </Field>
 
       <Field label="FLAG_STRUCTURE">
@@ -247,18 +250,20 @@ function ChallengeDetail({
       </Field>
 
       <Field label="TIMESTAMPS">
-        <div className="space-y-1 text-sm text-muted-foreground">
-          <div>CREATED: {formatTimestamp(challenge.created_at)}</div>
-          <div>UPDATED: {formatTimestamp(challenge.updated_at)}</div>
+        <div className="space-y-1 font-mono text-xs text-muted-foreground">
+          <div>Created: {formatTimestamp(challenge.created_at)}</div>
+          <div>Updated: {formatTimestamp(challenge.updated_at)}</div>
         </div>
       </Field>
 
-      <Button
+      <button
+        type="button"
         onClick={onLaunch}
-        className="mt-7 h-12 w-full rounded-none font-mono text-base font-bold"
+        className="button-primary mt-8 w-full"
       >
-        LAUNCH MATCH
-      </Button>
+        Launch this match
+        <ArrowUpRight className="size-3.5" />
+      </button>
     </>
   );
 }
