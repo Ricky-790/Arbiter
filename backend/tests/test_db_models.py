@@ -49,10 +49,15 @@ class DbModelTests(unittest.TestCase):
                 "setup_script",
                 "created_at",
                 "updated_at",
+                "prisoner_hint",
+                "warden_hint",
             ],
         )
         self.assertFalse(cols["setup_script"].nullable is False)
         self.assertTrue(cols["verifier_script"].nullable)
+        # The role briefings are optional, so a challenge need not author them.
+        self.assertTrue(cols["prisoner_hint"].nullable)
+        self.assertTrue(cols["warden_hint"].nullable)
         for name in (
             "verification_config",
             "flag",

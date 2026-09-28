@@ -1,22 +1,28 @@
-import { KeyRound } from "lucide-react";
+import { Check, KeyRound, Loader2, X } from "lucide-react";
 
 import {
   Select,
   SelectContent,
-  SelectGroup,
   SelectItem,
-  SelectLabel,
-  SelectSeparator,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
 import type { AvailableModelsResponse } from "@/lib/dto";
-import type { AgentSeat, SeatSide } from "@/lib/use-agent-seats";
+import {
+  type AgentSeat,
+  type ModelCheck,
+  type SeatSide,
+  modelsForProvider,
+} from "@/lib/use-agent-seats";
 
 /**
- * One side's model picker: the model, a key when the model is BYOK, and optional
- * tips for the agent. Shared by the launch page and the fork workbench so the
- * two make the same choice the same way.
+ * One side's seat: the provider, the model under it, a key (every model is
+ * BYOK), and optional tips for the agent. Shared by the launch page and the fork
+ * workbench so the two make the same choice the same way.
+ *
+ * The model is a free-text field backed by a suggestion list, so an operator can
+ * paste a name that is not curated. Whatever they enter is confirmed with the
+ * provider before the match can start.
  */
 export function AgentSeatPicker({
   side,
@@ -26,7 +32,8 @@ export function AgentSeatPicker({
   models,
   excluded,
   loading,
-  onChoose,
+  onChooseProvider,
+  onChooseModel,
   onApiKeyChange,
   onSuggestionsChange,
 }: {
@@ -35,15 +42,17 @@ export function AgentSeatPicker({
   hint: string;
   seat: AgentSeat;
   models: AvailableModelsResponse;
-  /** The other side's pick, which this side may not repeat. */
+  /** The other side's pick, as `provider:model`; this side may not repeat it. */
   excluded: string;
   loading: boolean;
-  onChoose: (model: string) => void;
+  onChooseProvider: (provider: string) => void;
+  onChooseModel: (model: string) => void;
   onApiKeyChange: (value: string) => void;
   onSuggestionsChange: (value: string) => void;
 }) {
-  const freeModels = models.free_models.filter((model) => model !== excluded);
-  const byokModels = models.byok_models.filter((model) => model !== excluded);
+  const suggested = modelsForProvider(models, seat.provider).filter(
+    (model) => `${seat.provider}:${model}` !== excluded,
+  );
 
   return (
     <div className={`agent-panel ${side}`}>
@@ -52,52 +61,70 @@ export function AgentSeatPicker({
         <span className="agent-hint">{hint}</span>
       </div>
 
-      <Select value={seat.model} onValueChange={onChoose} disabled={loading}>
-        <SelectTrigger aria-label={`${label} model`} className="select-trigger">
-          <SelectValue
-            placeholder={loading ? "Loading models..." : "Select model"}
+      <div className="agent-selects">
+        <Select
+          value={seat.provider}
+          onValueChange={onChooseProvider}
+          disabled={loading}
+        >
+          <SelectTrigger
+            aria-label={`${label} provider`}
+            className="select-trigger"
+          >
+            <SelectValue
+              placeholder={loading ? "Loading providers..." : "Select provider"}
+            />
+          </SelectTrigger>
+          <SelectContent className="max-h-[min(18rem,var(--radix-select-content-available-height))]">
+            {models.providers.map((entry) => (
+              <SelectItem
+                key={entry.provider}
+                value={entry.provider}
+                className="cursor-pointer font-mono text-xs"
+              >
+                {entry.provider}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+
+        <div className="agent-model-row">
+          <input
+            id={`${side}-model`}
+            className="field-input"
+            // Suggestions, not a whitelist: any name can be typed or pasted.
+            list={`${side}-model-options`}
+            value={seat.model}
+            onChange={(event) => onChooseModel(event.target.value)}
+            disabled={loading || seat.provider === ""}
+            placeholder={
+              seat.provider === ""
+                ? "Select a provider first"
+                : "Pick or paste a model name"
+            }
+            autoComplete="off"
+            spellCheck={false}
+            aria-label={`${label} model`}
+            aria-invalid={seat.check.status === "invalid"}
           />
-        </SelectTrigger>
-        <SelectContent className="max-h-[min(18rem,var(--radix-select-content-available-height))]">
-          <SelectGroup>
-            <SelectLabel className="font-mono text-[10px] uppercase text-muted-foreground">
-              Free models
-            </SelectLabel>
-            <SelectSeparator className="bg-border" />
-            {freeModels.map((model) => (
-              <SelectItem
-                key={model}
-                value={model}
-                className="cursor-pointer font-mono text-xs"
-              >
-                {model}
-              </SelectItem>
+          <datalist id={`${side}-model-options`}>
+            {suggested.map((model) => (
+              <option key={model} value={model} />
             ))}
-          </SelectGroup>
-          <SelectSeparator className="bg-border" />
-          <SelectGroup>
-            <SelectLabel className="font-mono text-[10px] uppercase text-primary">
-              BYOK models
-            </SelectLabel>
-            <SelectSeparator className="bg-border" />
-            {byokModels.map((model) => (
-              <SelectItem
-                key={model}
-                value={model}
-                className="cursor-pointer font-mono text-xs"
-              >
-                {model}
-              </SelectItem>
-            ))}
-          </SelectGroup>
-        </SelectContent>
-      </Select>
+          </datalist>
+          <ModelCheckBadge check={seat.check} />
+        </div>
+      </div>
+
+      {seat.check.detail !== null && seat.check.status !== "ok" && (
+        <p className="model-check-detail">{seat.check.detail}</p>
+      )}
 
       {seat.needsKey && (
         <div className="agent-key">
           <label htmlFor={`${side}-api-key`}>
             <KeyRound className="mr-1 inline size-3" />
-            {label} API key
+            {seat.provider} API key
           </label>
           <input
             id={`${side}-api-key`}
@@ -110,7 +137,10 @@ export function AgentSeatPicker({
             aria-label={`${label} API key`}
             className="field-input"
           />
-          <p>Used for this match only.</p>
+          <p>
+            Used for this match only. Enter it and the model name is checked
+            with {seat.provider}.
+          </p>
         </div>
       )}
 
@@ -126,5 +156,45 @@ export function AgentSeatPicker({
         />
       )}
     </div>
+  );
+}
+
+/** The tick beside the model field: confirmed, rejected, checking, or nothing. */
+function ModelCheckBadge({ check }: { check: ModelCheck }) {
+  if (check.status === "idle") return null;
+
+  if (check.status === "checking") {
+    return (
+      <span className="model-check is-checking" title="Checking this model...">
+        <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+        <span className="sr-only">Checking this model</span>
+      </span>
+    );
+  }
+
+  if (check.status === "ok") {
+    return (
+      <span
+        className="model-check is-ok"
+        title="This model was confirmed with the provider"
+      >
+        <Check className="size-3.5" aria-hidden="true" />
+        <span className="sr-only">Model confirmed</span>
+      </span>
+    );
+  }
+
+  return (
+    <span
+      className={`model-check ${check.status === "invalid" ? "is-invalid" : "is-unreachable"}`}
+      title={check.detail ?? "This model could not be confirmed"}
+    >
+      <X className="size-3.5" aria-hidden="true" />
+      <span className="sr-only">
+        {check.status === "invalid"
+          ? "Model not found"
+          : "Could not check this model"}
+      </span>
+    </span>
   );
 }

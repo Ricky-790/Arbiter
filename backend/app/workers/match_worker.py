@@ -17,7 +17,7 @@ from uuid import UUID
 
 from dotenv import load_dotenv
 
-from app.agents.agents_directory import split_model_name
+from app.agents.agents_directory import join_model_name
 from app.agents.prisoner import PrisonerAgent
 from app.agents.warden import WardenAgent
 from app.broker.events import MatchEventPublisher
@@ -56,9 +56,9 @@ def start_match_task(self: Any, **payload: Any) -> dict[str, Any]:
 async def run_match(message: MatchStartMessage) -> dict[str, Any]:
     """Load the challenge, run the match, and return a JSON-safe summary.
 
-    A side queued with ``*_byok`` redeems its user-supplied key here: the key
-    arrives by reference only, is read out of the encrypted store as the agents
-    are built, and is cleared again when the match is done.
+    Each side redeems its user-supplied key here: the key arrives by reference
+    only, is read out of the encrypted store as the agents are built, and is
+    cleared again when the match is done.
     """
     try:
         spec = await load_challenge_spec(message.challenge_id)
@@ -113,20 +113,22 @@ async def run_match(message: MatchStartMessage) -> dict[str, Any]:
 async def build_agents(
     message: MatchStartMessage, spec: ChallengeSpec
 ) -> tuple[PrisonerAgent, WardenAgent]:
-    """Build both agents, redeeming the BYOK key each side was queued with."""
-    prisoner_key = await redeem_byok_key(
-        message.match_id, PRISONER, message.prisoner_byok
-    )
-    warden_key = await redeem_byok_key(message.match_id, WARDEN, message.warden_byok)
+    """Build both agents, redeeming the key each side was queued with."""
+    prisoner_key = await redeem_byok_key(message.match_id, PRISONER)
+    warden_key = await redeem_byok_key(message.match_id, WARDEN)
     return (
         PrisonerAgent(
-            model_name=message.prisoner_model,
+            model_name=_canonical_model(
+                message.prisoner_provider, message.prisoner_model, PRISONER
+            ),
             objective=prisoner_objective(spec),
             instructions=message.prisoner_suggestions,
             api_key=prisoner_key,
         ),
         WardenAgent(
-            model_name=message.warden_model,
+            model_name=_canonical_model(
+                message.warden_provider, message.warden_model, WARDEN
+            ),
             objective=warden_objective(spec),
             instructions=message.warden_suggestions,
             api_key=warden_key,
@@ -134,18 +136,34 @@ async def build_agents(
     )
 
 
-async def redeem_byok_key(match_id: UUID, side: str, enabled: bool) -> str | None:
-    """Read one side's BYOK key, or ``None`` when it uses a free model.
+def _canonical_model(provider: str, model: str, side: str) -> str:
+    """Join a queued provider/model pair into the name the runtime resolves.
 
-    The store deletes the entry as it is read, so from here the key lives only
-    in this worker process, holding the model client for this match.
+    The API validates the pair before queueing, so a miss here means the
+    catalogue changed under a message already in flight.
     """
-    if not enabled:
-        return None
+    joined = join_model_name(provider, model)
+    if joined is None:
+        raise ValueError(
+            f"The {side} was queued with unknown model {provider}:{model}; "
+            "it is no longer in the model directory"
+        )
+    return joined
+
+
+async def redeem_byok_key(match_id: UUID, side: str) -> str:
+    """Read one side's provider key from the encrypted store.
+
+    Every model is BYOK, so a missing key is a hard failure: without it the
+    agent cannot be built, and quietly substituting a deployment credential
+    would run the match on the wrong account. The store deletes the entry as it
+    is read, so from here the key lives only in this worker process, holding the
+    model client for this match.
+    """
     api_key = await take_api_key(match_id, side)
     if api_key is None:
         raise RuntimeError(
-            f"BYOK key for the {side} of match {match_id} was not found "
+            f"Provider key for the {side} of match {match_id} was not found "
             "(expired before the worker picked the match up); queue it again"
         )
     return api_key
@@ -197,11 +215,7 @@ async def load_fork_plan(match_id: UUID) -> ForkPlan | None:
     factory = get_session_factory()
     async with factory() as session:
         match = await matches_service.get_match(match_id, session)
-    if (
-        match is None
-        or match.parent_match_id is None
-        or match.branch_event_id is None
-    ):
+    if match is None or match.parent_match_id is None or match.branch_event_id is None:
         return None
     return await plan_resume(match_id)
 
@@ -210,14 +224,12 @@ def build_match_metadata(
     message: MatchStartMessage, spec: ChallengeSpec
 ) -> dict[str, Any]:
     """Build the parent ``matches`` row snapshot the Engine persists"""
-    prisoner_provider, prisoner_model = split_model_name(message.prisoner_model)
-    warden_provider, warden_model = split_model_name(message.warden_model)
     return {
         "challenge_id": message.challenge_id,
-        "prisoner_model": prisoner_model,
-        "prisoner_provider": prisoner_provider,
-        "warden_model": warden_model,
-        "warden_provider": warden_provider,
+        "prisoner_model": message.prisoner_model,
+        "prisoner_provider": message.prisoner_provider,
+        "warden_model": message.warden_model,
+        "warden_provider": message.warden_provider,
         "win_condition": spec.win_condition,
     }
 
@@ -228,6 +240,8 @@ def build_challenge_spec(challenge: Challenge) -> ChallengeSpec:
         name=challenge.name,
         description=challenge.description,
         win_condition=challenge.win_condition,
+        prisoner_hint=challenge.prisoner_hint,
+        warden_hint=challenge.warden_hint,
         sandbox=SandboxConfig(**(challenge.sandbox_config or {})),
         files=dict(challenge.files or {}),
         environment=dict(challenge.env_vars or {}),
@@ -238,6 +252,18 @@ def build_challenge_spec(challenge: Challenge) -> ChallengeSpec:
     )
 
 
+def _with_hint(lines: list[str], hint: str | None) -> list[str]:
+    """Append a challenge's role-specific briefing, if it has one.
+
+    Each side's hint is only ever added to that side's objective, which is how
+    the challenge keeps what each role starts out knowing asymmetric. A blank or
+    whitespace-only hint adds nothing, rather than an empty ``Briefing:`` line.
+    """
+    if hint is not None and hint.strip():
+        lines.append(f"Briefing: {hint.strip()}")
+    return lines
+
+
 def prisoner_objective(spec: ChallengeSpec) -> str:
     lines = [
         "Win the match by completing the challenge and submitting the answer.",
@@ -245,6 +271,7 @@ def prisoner_objective(spec: ChallengeSpec) -> str:
         spec.description,
         f"Win condition: {spec.win_condition}",
     ]
+    _with_hint(lines, spec.prisoner_hint)
     if spec.flag_structure:
         lines.append(
             "Submit your answer with submit_flag as a JSON object whose fields "
@@ -256,11 +283,12 @@ def prisoner_objective(spec: ChallengeSpec) -> str:
 
 
 def warden_objective(spec: ChallengeSpec) -> str:
-    return (
-        "Prevent the Prisoner from completing the challenge.\n"
-        f"Challenge: {spec.name}\n"
-        f"{spec.description}"
-    )
+    lines = [
+        "Prevent the Prisoner from completing the challenge.",
+        f"Challenge: {spec.name}",
+        spec.description,
+    ]
+    return "\n".join(_with_hint(lines, spec.warden_hint))
 
 
 def default_timeout_seconds() -> float:

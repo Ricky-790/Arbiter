@@ -109,18 +109,24 @@ class MatchEventListResponse(PaginationMeta):
 
 
 class StartMatchRequest(BaseModel):
-    """Request body for ``POST /api/v1/matches/start-match``."""
+    """Request body for ``POST /api/v1/matches/start-match``.
+
+    Each side names a provider and a model separately, matching how the picker
+    asks for them and how the ``matches`` row stores them.
+    """
 
     challenge_id: UUID
+    prisoner_provider: str
     prisoner_model: str
+    warden_provider: str
     warden_model: str
     #: Optional free-text tips appended to each agent's role instructions.
     prisoner_suggestions: str | None = None
     warden_suggestions: str | None = None
-    #: BYOK provider keys for the side(s) using a BYOK model. Sent in the body,
-    #: never stored on the match row, never logged, and never echoed back. They
-    #: are held encrypted for the match only and handed to the worker by
-    #: reference (see :mod:`app.secrets`).
+    #: Provider keys, one per side. Every model is BYOK, so both are required.
+    #: Sent in the body, never stored on the match row, never logged, and never
+    #: echoed back. They are held encrypted for the match only and handed to the
+    #: worker by reference (see :mod:`app.secrets`).
     prisoner_api_key: SecretStr | None = None
     warden_api_key: SecretStr | None = None
 
@@ -172,14 +178,16 @@ class ForkDetailSchema(ForkSchema):
     """A fork plus everything the fork page needs to start a match from it.
 
     ``latest_turns`` is the tool-call history behind the fork point and the two
-    conversations are what each agent already knew there. ``prisoner_model`` /
-    ``warden_model`` are the *parent match's* models, offered as a starting
-    point for the picker — the fork itself has none, and the caller is free to
-    choose different ones.
+    conversations are what each agent already knew there. The provider/model
+    fields are the *parent match's* choices, offered as a starting point for the
+    picker — the fork itself has none, and the caller is free to choose
+    different ones.
     """
 
     challenge_id: UUID
+    prisoner_provider: str | None = None
     prisoner_model: str | None = None
+    warden_provider: str | None = None
     warden_model: str | None = None
     latest_turns: list[MatchEventSchema]
     prisoner_messages: list[dict[str, Any]] | None = None
@@ -195,7 +203,9 @@ class StartForkMatchRequest(BaseModel):
     """
 
     fork_id: UUID
+    prisoner_provider: str
     prisoner_model: str
+    warden_provider: str
     warden_model: str
     prisoner_suggestions: str | None = None
     warden_suggestions: str | None = None
@@ -203,12 +213,48 @@ class StartForkMatchRequest(BaseModel):
     warden_api_key: SecretStr | None = None
 
 
-class AvailableModelsResponse(BaseModel):
-    """Selectable models, split by whether the caller must supply a key.
+class ProviderModels(BaseModel):
+    """One provider and the models it offers, in display order."""
 
-    ``free_models`` run on this deployment's own provider keys; ``byok_models``
-    need a key for that side in the start-match request.
+    provider: str
+    models: list[str]
+
+
+class AvailableModelsResponse(BaseModel):
+    """The selectable catalogue: providers, each with its own models.
+
+    The picker chooses a provider first and then a model from that provider's
+    list, so the two are kept separate rather than flattened into combined
+    names. These models are *suggestions*: the picker also accepts a pasted
+    name, which is confirmed with the provider by ``POST /matches/verify-model``.
     """
 
-    free_models: list[str]
-    byok_models: list[str]
+    providers: list[ProviderModels]
+
+
+class ModelCheckRequest(BaseModel):
+    """Request body for ``POST /api/v1/matches/verify-model``.
+
+    Asks whether a provider serves a given model. Sent in the body, never as a
+    query parameter, so the key cannot end up in a URL, a log or browser
+    history.
+    """
+
+    provider: str
+    model: str
+    api_key: SecretStr
+
+
+class ModelCheckResponse(BaseModel):
+    """Whether a pasted model name was confirmed with its provider.
+
+    ``exists`` false is a normal answer rather than an error, so the UI can show
+    the reason beside the field. ``reason`` is ``not_found`` (the provider
+    answered and does not serve it), ``key_rejected`` (the credential was
+    refused) or ``unreachable`` (the provider could not be asked). Never carries
+    the key, or any text echoed back from the provider.
+    """
+
+    exists: bool
+    reason: str | None = None
+    detail: str | None = None

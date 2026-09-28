@@ -106,3 +106,8 @@ class Challenge(Base):
         back_populates="challenge",
         lazy="selectin",
     )
+    #: Starting briefing for the Prisoner (where to look). Optional.
+    prisoner_hint: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    #: Starting briefing for the Warden (what to protect). Optional.
+    warden_hint: Mapped[str | None] = mapped_column(Text, nullable=True)

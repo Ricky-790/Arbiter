@@ -14,12 +14,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
-from app.agents.agents_directory import (
-    BYOK_MODEL_NAMES,
-    agent_mapper,
-    join_model_name,
-    split_model_name,
-)
+from app.agents.agents_directory import PROVIDER_MODELS, join_model_name
 from app.workers import fork_worker, match_worker
 from app.workers.celery_app import (
     CREATE_FORK_TASK,
@@ -34,8 +29,10 @@ def match_payload() -> dict[str, str]:
     return {
         "match_id": str(uuid4()),
         "challenge_id": str(uuid4()),
-        "prisoner_model": "nvidia/glm-5.3",
-        "warden_model": "nvidia/glm-5.3",
+        "prisoner_provider": "openai",
+        "prisoner_model": "gpt-4o-mini",
+        "warden_provider": "google",
+        "warden_model": "gemini-2.0-flash",
     }
 
 
@@ -83,56 +80,37 @@ class WorkerRoutingTests(unittest.TestCase):
         self.assertIn(CREATE_FORK_TASK, celery_app.tasks)
 
 
-#: Names offered as both ``provider/model`` (free) and ``provider:model``
-#: (BYOK), so a match row's split pair cannot say which one it came from.
-AMBIGUOUS_NAMES = {"google:gemini-3.1-flash-lite"}
-
-
 class ForkModelInheritanceTests(unittest.TestCase):
     """A fork inherits models, so the row's split columns must rejoin exactly.
 
-    This is the regression guard for free models being refused a fork: the join
-    used to check the BYOK form first, and ``provider:model`` parses for any
-    known provider prefix, so free OpenRouter and Google models came back as
-    BYOK and were rejected as unforkable.
+    The match row stores the provider and the bare model separately, and the
+    agent runtime resolves the joined ``provider:model``. A fork reads the
+    parent's two columns back, so the join has to round-trip every pair the
+    catalogue offers.
     """
 
-    def test_every_free_model_round_trips(self) -> None:
-        for name in agent_mapper:
-            with self.subTest(name=name):
-                provider, model = split_model_name(name)
-                self.assertEqual(join_model_name(provider, model), name)
+    def test_every_catalogue_pair_round_trips(self) -> None:
+        for provider, models in PROVIDER_MODELS.items():
+            for model in models:
+                with self.subTest(provider=provider, model=model):
+                    self.assertEqual(
+                        join_model_name(provider, model), f"{provider}:{model}"
+                    )
 
-    def test_every_unambiguous_byok_model_round_trips(self) -> None:
-        for name in BYOK_MODEL_NAMES:
-            if name in AMBIGUOUS_NAMES:
-                continue
-            with self.subTest(name=name):
-                provider, model = split_model_name(name)
-                self.assertEqual(join_model_name(provider, model), name)
+    def test_an_openrouter_pair_keeps_its_slash(self) -> None:
+        name = join_model_name("openrouter", "meta-llama/llama-3.3-70b-instruct")
 
-    def test_a_pair_in_both_catalogues_resolves_to_the_free_model(self) -> None:
-        """Pins a known limitation: the row stores only the split halves.
+        self.assertEqual(name, "openrouter:meta-llama/llama-3.3-70b-instruct")
 
-        Derived from the catalogues rather than hardcoded, so adding or
-        removing a model does not make this fail for the wrong reason.
-        """
-        collisions = []
-        for name in BYOK_MODEL_NAMES:
-            provider, _, model = name.partition(":")
-            if provider and model and f"{provider}/{model}" in agent_mapper:
-                collisions.append((provider, model))
-        if not collisions:
-            self.skipTest("no name is offered as both free and BYOK")
-
-        for provider, model in collisions:
-            with self.subTest(name=f"{provider}:{model}"):
-                self.assertEqual(
-                    join_model_name(provider, model), f"{provider}/{model}"
-                )
-
-    def test_a_model_that_left_the_catalogue_joins_to_nothing(self) -> None:
+    def test_an_unknown_provider_joins_to_nothing(self) -> None:
         self.assertIsNone(join_model_name("nvidia", "not-a-real-model"))
+
+    def test_an_uncurated_model_still_joins(self) -> None:
+        """The curated list is suggestions; the provider decides what is real."""
+        self.assertEqual(
+            join_model_name("openai", "a-model-we-have-not-curated"),
+            "openai:a-model-we-have-not-curated",
+        )
 
 
 if __name__ == "__main__":

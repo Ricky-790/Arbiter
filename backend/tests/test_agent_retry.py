@@ -48,7 +48,8 @@ class ScriptedModel:
 
 def make_agent(model: object) -> ToolChoosingAgent:
     agent = ToolChoosingAgent(
-        model_name="nvidia/laguna-xs-2.1",
+        model_name="openai:gpt-4o-mini",
+        api_key="test-key",
         instructions="test",
         allowed_tools={"bash"},
         scripted_calls=None,
@@ -95,7 +96,9 @@ class ProviderRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("3 attempts", str(raised.exception))
         self.assertIn("429", str(raised.exception))
         # Only the attempts that actually retry are reported as retries.
-        self.assertEqual([event for event, _ in reported], ["agent_retry", "agent_retry"])
+        self.assertEqual(
+            [event for event, _ in reported], ["agent_retry", "agent_retry"]
+        )
         self.assertEqual([attrs["attempt"] for _, attrs in reported], [1, 2])
         self.assertEqual([attrs["max_attempts"] for _, attrs in reported], [3, 3])
 

@@ -1360,6 +1360,12 @@
     letter-spacing: 0.06em;
   }
 
+  .agent-selects {
+    display: grid;
+    gap: 0.5rem;
+    margin-top: 1rem;
+  }
+
   .agent-panel .select-trigger {
     min-height: 3.15rem;
     margin-top: 1rem;
@@ -1368,6 +1374,58 @@
     color: var(--color-foreground);
     font-family: var(--font-mono);
     font-size: 0.7rem;
+  }
+
+  /* The wrapper already spaces the two selects apart. */
+  .agent-selects .select-trigger {
+    margin-top: 0;
+  }
+
+  .agent-model-row {
+    position: relative;
+    display: flex;
+    align-items: center;
+  }
+
+  .agent-model-row .field-input {
+    width: 100%;
+    padding-right: 2.2rem;
+  }
+
+  .model-check {
+    position: absolute;
+    right: 0.7rem;
+    display: inline-flex;
+    align-items: center;
+  }
+
+  .model-check.is-ok {
+    color: var(--color-moss);
+  }
+
+  .model-check.is-invalid {
+    color: var(--color-destructive);
+  }
+
+  .model-check.is-unreachable {
+    color: var(--color-primary);
+  }
+
+  .model-check.is-checking {
+    color: var(--color-muted-foreground);
+  }
+
+  .model-check-detail {
+    margin: 0.5rem 0 0;
+    color: var(--color-destructive);
+    font-family: var(--font-mono);
+    font-size: 0.58rem;
+    line-height: 1.5;
+  }
+
+  /* A model name still awaiting confirmation must not be styled as valid. */
+  .agent-model-row .field-input[aria-invalid="true"] {
+    border-color: var(--color-destructive);
   }
 
   .agent-key {

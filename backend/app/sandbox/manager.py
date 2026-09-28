@@ -5,17 +5,25 @@ import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path, PurePosixPath
 
+from e2b import AsyncSandbox
 from solari_core import CodeLanguage, ConcurrencyLimitError
 from solari_sandbox import Sandbox
 
 from app.agents.tools.models import ToolResult
 from app.logger import get_logger
 
-from .client import SolariClient
+from .e2b_client import E2BClient
 from .models import ChallengeSpec, CommandResult, SandboxConfig
 from .monitor import EventHandler, SandboxMonitor
+from .solari_client import SolariClient
 
 logger = get_logger()
+
+#: A live sandbox handle from either provider. ``SandboxManager`` only ever
+#: calls operations both clients expose, so it does not care which one created
+#: the handle; the alias keeps that explicit instead of pretending one
+#: provider's type covers the other.
+SandboxHandle = AsyncSandbox | Sandbox
 
 #: How long a match waits for a free Solari slot before giving up. Solari runs
 #: one live sandbox at a time, so a match requested while another is running
@@ -33,9 +41,9 @@ SANDBOX_RETRY_MAX_DELAY_SECONDS = 30.0
 class SandboxManager:
     """Shared sandbox infrastructure and concrete execution boundary for tools."""
 
-    def __init__(self, client: SolariClient | None = None) -> None:
-        self.client = client or SolariClient()
-        self.sandboxes: dict[str, Sandbox] = {}
+    def __init__(self, client: E2BClient | SolariClient | None = None) -> None:
+        self.client = client or E2BClient()
+        self.sandboxes: dict[str, SandboxHandle] = {}
         self._file_unwatchers: dict[str, list[Callable[[], Awaitable[None]]]] = {}
         self._process_watches: dict[str, set[str]] = {}
         self._auto_kill_rules: dict[str, set[str]] = {}
@@ -51,14 +59,14 @@ class SandboxManager:
         config: SandboxConfig | None = None,
         *,
         from_snapshot: str | None = None,
-    ) -> Sandbox:
+    ) -> SandboxHandle:
         """Create a new sandbox instance.
 
-        ``from_snapshot`` boots a saved Solari snapshot instead of a bare
+        ``from_snapshot`` boots a saved provider snapshot instead of a bare
         template, which is how a fork opens straight into already-reconstructed
         state.
         """
-        sbx: Sandbox | None = self.sandboxes.get(match_id, None)
+        sbx: SandboxHandle | None = self.sandboxes.get(match_id, None)
         if sbx:
             logger.error(f"A sandbox instance for match_id: {match_id} already exists")
             raise ValueError(
@@ -77,8 +85,8 @@ class SandboxManager:
         *,
         wait_seconds: float | None = None,
         from_snapshot: str | None = None,
-    ) -> Sandbox:
-        """Return the match sandbox, creating it once a Solari slot is free.
+    ) -> SandboxHandle:
+        """Return the match sandbox, creating it once a provider slot is free.
 
         Solari allows one live sandbox at a time, so a match requested while
         another is still running waits here instead of failing: it keeps
@@ -120,7 +128,7 @@ class SandboxManager:
                 await asyncio.sleep(wait)
                 delay = min(delay * 2, SANDBOX_RETRY_MAX_DELAY_SECONDS)
 
-    async def get_sandbox(self, match_id: str) -> Sandbox:
+    async def get_sandbox(self, match_id: str) -> SandboxHandle:
         try:
             return self.sandboxes[match_id]
         except KeyError as error:

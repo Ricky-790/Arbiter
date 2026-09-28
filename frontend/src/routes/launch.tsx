@@ -7,7 +7,7 @@ import { AgentSeatPicker } from "@/components/arbiter/agent-seat-picker";
 import { Eyebrow } from "@/components/arbiter/app-shell";
 import { getChallenge, listModels, startMatch } from "@/lib/api";
 import type { AvailableModelsResponse } from "@/lib/dto";
-import { useAgentSeats } from "@/lib/use-agent-seats";
+import { seatModelKey, useAgentSeats } from "@/lib/use-agent-seats";
 
 export const Route = createFileRoute("/launch")({
   validateSearch: (
@@ -39,7 +39,7 @@ function LaunchPage() {
   const { challengeId = "" } = Route.useSearch();
 
   const modelsQuery = useQuery({
-    queryKey: ["free-models"],
+    queryKey: ["models"],
     queryFn: listModels,
   });
 
@@ -50,17 +50,24 @@ function LaunchPage() {
   });
 
   const models: AvailableModelsResponse = modelsQuery.data ?? {
-    free_models: [],
-    byok_models: [],
+    providers: [],
   };
-  const { seats, ready, choose, setApiKey, setSuggestions } =
-    useAgentSeats(models);
+  const {
+    seats,
+    ready,
+    chooseProvider,
+    chooseModel,
+    setApiKey,
+    setSuggestions,
+  } = useAgentSeats(models);
 
   const launch = useMutation({
     mutationFn: () =>
       startMatch({
         challenge_id: challengeId,
+        prisoner_provider: seats.prisoner.provider,
         prisoner_model: seats.prisoner.model,
+        warden_provider: seats.warden.provider,
         warden_model: seats.warden.model,
         prisoner_suggestions: seats.prisoner.suggestions.trim() || null,
         warden_suggestions: seats.warden.suggestions.trim() || null,
@@ -193,9 +200,12 @@ function LaunchPage() {
               hint="Attacker"
               seat={seats.prisoner}
               models={models}
-              excluded={seats.warden.model}
+              excluded={seatModelKey(seats.warden)}
               loading={modelsQuery.isPending}
-              onChoose={(model) => choose("prisoner", model)}
+              onChooseProvider={(provider) =>
+                chooseProvider("prisoner", provider)
+              }
+              onChooseModel={(model) => chooseModel("prisoner", model)}
               onApiKeyChange={(value) => setApiKey("prisoner", value)}
               onSuggestionsChange={(value) => setSuggestions("prisoner", value)}
             />
@@ -205,9 +215,12 @@ function LaunchPage() {
               hint="Defender"
               seat={seats.warden}
               models={models}
-              excluded={seats.prisoner.model}
+              excluded={seatModelKey(seats.prisoner)}
               loading={modelsQuery.isPending}
-              onChoose={(model) => choose("warden", model)}
+              onChooseProvider={(provider) =>
+                chooseProvider("warden", provider)
+              }
+              onChooseModel={(model) => chooseModel("warden", model)}
               onApiKeyChange={(value) => setApiKey("warden", value)}
               onSuggestionsChange={(value) => setSuggestions("warden", value)}
             />
@@ -219,10 +232,10 @@ function LaunchPage() {
             </p>
           )}
 
-          {seats.prisoner.model !== "" &&
-            seats.prisoner.model === seats.warden.model && (
+          {seatModelKey(seats.prisoner) !== "" &&
+            seatModelKey(seats.prisoner) === seatModelKey(seats.warden) && (
               <p className="launch-status error">
-                Prisoner and Warden cannot use the same model.
+                Prisoner and Warden cannot use the same provider and model.
               </p>
             )}
 

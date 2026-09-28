@@ -17,6 +17,8 @@ import type {
   MatchEventSchema,
   MatchListResponse,
   MatchListSchema,
+  ModelCheckRequest,
+  ModelCheckResponse,
   SortOrder,
   SpectateEvent,
   StartForkMatchRequest,
@@ -72,11 +74,32 @@ export function getChallenge(challengeId: string): Promise<ChallengeSchema> {
 }
 
 /**
- * `GET /api/v1/matches/free-models` — selectable models, split into free ones
- * (the deployment's own keys) and BYOK ones (the caller's key).
+ * `GET /api/v1/matches/models` — the selectable catalogue: each provider and the
+ * models it offers. Every model is BYOK, so the caller supplies the key. These
+ * are suggestions; a pasted name is accepted too and confirmed by `verifyModel`.
  */
 export function listModels(): Promise<AvailableModelsResponse> {
-  return request<AvailableModelsResponse>("/api/v1/matches/free-models");
+  return request<AvailableModelsResponse>("/api/v1/matches/models");
+}
+
+/**
+ * `POST /api/v1/matches/verify-model` — ask whether a provider serves a model.
+ *
+ * The browser cannot ask the provider directly: CORS blocks it, and sending the
+ * key from the page would expose it. The backend makes the call with the key.
+ * A model that cannot be confirmed comes back as `exists: false`, not an error.
+ */
+export function verifyModel(
+  payload: ModelCheckRequest,
+  signal?: AbortSignal,
+): Promise<ModelCheckResponse> {
+  return request<ModelCheckResponse>("/api/v1/matches/verify-model", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    // `RequestInit.signal` is `AbortSignal | null`, not optional here.
+    signal: signal ?? null,
+  });
 }
 
 /** `POST /api/v1/matches/start-match` — queue a match, returns its id. */

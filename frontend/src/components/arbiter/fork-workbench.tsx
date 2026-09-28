@@ -9,11 +9,11 @@ import { Eyebrow } from "@/components/arbiter/app-shell";
 import { ForkMemory } from "@/components/arbiter/fork-memory";
 import { getChallenge, getFork, listModels, startFromFork } from "@/lib/api";
 import type { AvailableModelsResponse } from "@/lib/dto";
-import { formatDateTime } from "@/lib/format";
+import { formatDateTime, formatModel } from "@/lib/format";
 import { isForkPending, isForkReady } from "@/lib/match-status";
-import { useAgentSeats } from "@/lib/use-agent-seats";
+import { seatModelKey, useAgentSeats } from "@/lib/use-agent-seats";
 
-const NO_MODELS: AvailableModelsResponse = { free_models: [], byok_models: [] };
+const NO_MODELS: AvailableModelsResponse = { providers: [] };
 
 /**
  * The fork workbench: what the fork remembers, and a form to run it again.
@@ -44,27 +44,47 @@ export function ForkWorkbench({ forkId }: { forkId: string }) {
   });
 
   const modelsQuery = useQuery({
-    queryKey: ["free-models"],
+    queryKey: ["models"],
     queryFn: listModels,
   });
 
   const models = modelsQuery.data ?? NO_MODELS;
-  // The parent match's models are the fork's suggestion, not a requirement: they
-  // pre-fill the pickers once the catalogue loads and stay editable.
+  // The parent match's choices are the fork's suggestion, not a requirement:
+  // they pre-fill the pickers once the catalogue loads and stay editable.
   const defaults = useMemo(
-    () => ({ prisoner: fork?.prisoner_model, warden: fork?.warden_model }),
-    [fork?.prisoner_model, fork?.warden_model],
+    () => ({
+      prisoner:
+        fork?.prisoner_provider && fork?.prisoner_model
+          ? { provider: fork.prisoner_provider, model: fork.prisoner_model }
+          : null,
+      warden:
+        fork?.warden_provider && fork?.warden_model
+          ? { provider: fork.warden_provider, model: fork.warden_model }
+          : null,
+    }),
+    [
+      fork?.prisoner_provider,
+      fork?.prisoner_model,
+      fork?.warden_provider,
+      fork?.warden_model,
+    ],
   );
-  const { seats, ready, choose, setApiKey, setSuggestions } = useAgentSeats(
-    models,
-    defaults,
-  );
+  const {
+    seats,
+    ready,
+    chooseProvider,
+    chooseModel,
+    setApiKey,
+    setSuggestions,
+  } = useAgentSeats(models, defaults);
 
   const start = useMutation({
     mutationFn: () =>
       startFromFork({
         fork_id: forkId,
+        prisoner_provider: seats.prisoner.provider,
         prisoner_model: seats.prisoner.model,
+        warden_provider: seats.warden.provider,
         warden_model: seats.warden.model,
         prisoner_suggestions: seats.prisoner.suggestions.trim() || null,
         warden_suggestions: seats.warden.suggestions.trim() || null,
@@ -191,8 +211,9 @@ export function ForkWorkbench({ forkId }: { forkId: string }) {
           <p className="fork-parent-models">
             <span className="mono-label">Parent&apos;s models</span>
             <span>
-              {fork.prisoner_model ?? "—"}{" "}
-              <span className="text-muted">vs</span> {fork.warden_model ?? "—"}
+              {forkModelLabel(fork.prisoner_provider, fork.prisoner_model)}{" "}
+              <span className="text-muted">vs</span>{" "}
+              {forkModelLabel(fork.warden_provider, fork.warden_model)}
             </span>
           </p>
         </aside>
@@ -240,9 +261,12 @@ export function ForkWorkbench({ forkId }: { forkId: string }) {
                   hint="Attacker"
                   seat={seats.prisoner}
                   models={models}
-                  excluded={seats.warden.model}
+                  excluded={seatModelKey(seats.warden)}
                   loading={modelsQuery.isPending}
-                  onChoose={(model) => choose("prisoner", model)}
+                  onChooseProvider={(provider) =>
+                    chooseProvider("prisoner", provider)
+                  }
+                  onChooseModel={(model) => chooseModel("prisoner", model)}
                   onApiKeyChange={(value) => setApiKey("prisoner", value)}
                   onSuggestionsChange={(value) =>
                     setSuggestions("prisoner", value)
@@ -254,9 +278,12 @@ export function ForkWorkbench({ forkId }: { forkId: string }) {
                   hint="Defender"
                   seat={seats.warden}
                   models={models}
-                  excluded={seats.prisoner.model}
+                  excluded={seatModelKey(seats.prisoner)}
                   loading={modelsQuery.isPending}
-                  onChoose={(model) => choose("warden", model)}
+                  onChooseProvider={(provider) =>
+                    chooseProvider("warden", provider)
+                  }
+                  onChooseModel={(model) => chooseModel("warden", model)}
                   onApiKeyChange={(value) => setApiKey("warden", value)}
                   onSuggestionsChange={(value) =>
                     setSuggestions("warden", value)
@@ -270,10 +297,10 @@ export function ForkWorkbench({ forkId }: { forkId: string }) {
                 </p>
               )}
 
-              {seats.prisoner.model !== "" &&
-                seats.prisoner.model === seats.warden.model && (
+              {seatModelKey(seats.prisoner) !== "" &&
+                seatModelKey(seats.prisoner) === seatModelKey(seats.warden) && (
                   <p className="launch-status error">
-                    Prisoner and Warden cannot use the same model.
+                    Prisoner and Warden cannot use the same provider and model.
                   </p>
                 )}
 
@@ -300,6 +327,12 @@ export function ForkWorkbench({ forkId }: { forkId: string }) {
       </div>
     </main>
   );
+}
+
+/** The parent's choice as the app displays models, or a dash when unavailable. */
+function forkModelLabel(provider: string | null, model: string | null): string {
+  if (provider === null || model === null) return "—";
+  return formatModel(provider, model);
 }
 
 function forkLabel(status: string): string {

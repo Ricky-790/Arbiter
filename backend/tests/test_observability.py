@@ -119,12 +119,16 @@ class ObservabilityTests(unittest.IsolatedAsyncioTestCase):
     async def test_match_creates_single_root_span_with_lifecycle(self) -> None:
         engine = self.make_engine()
         prisoner = PrisonerAgent(
-            model_name="nvidia/laguna-xs-2.1",
+            model_name="openai:gpt-4o-mini",
+            api_key="test-key",
             objective="o",
             scripted_calls=[ToolCall(name="bash", arguments={"command": "id"})],
         )
         warden = WardenAgent(
-            model_name="nvidia/laguna-xs-2.1", objective="o", scripted_calls=[]
+            model_name="openai:gpt-4o-mini",
+            api_key="test-key",
+            objective="o",
+            scripted_calls=[],
         )
         await engine.run_agents(prisoner, warden, timeout_seconds=0.3)
 
@@ -332,9 +336,7 @@ class ObservabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(matches), 1)
         self.assertEqual(len(agents), 2)
         self.assertEqual(len(chats), 2)
-        roles = sorted(
-            self.spans.attrs(a)["arbiter.agent_role"] for a in agents
-        )
+        roles = sorted(self.spans.attrs(a)["arbiter.agent_role"] for a in agents)
         self.assertEqual(roles, ["prisoner", "warden"])
         for span in agents + chats:
             attrs = self.spans.attrs(span)
@@ -366,9 +368,7 @@ class ObservabilityTests(unittest.IsolatedAsyncioTestCase):
         agent: Agent[None, str] = Agent(_text_model(), output_type=str)
         await agent.run("hello")
         for span in self.spans.spans():
-            self.assertNotIn(
-                "arbiter.match_id", dict(span.attributes or {})
-            )
+            self.assertNotIn("arbiter.match_id", dict(span.attributes or {}))
 
 
 if __name__ == "__main__":

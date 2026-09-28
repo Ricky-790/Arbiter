@@ -9,7 +9,7 @@ from .instructions import WARDEN_INSTRUCTIONS
 class WardenAgent(ToolChoosingAgent):
     def __init__(
         self,
-        model_name: str = "google/gemini-3.1-flash-lite",
+        model_name: str = "openai:gpt-4o-mini",
         *,
         objective: str | None = None,
         instructions: str | None = None,
@@ -18,7 +18,7 @@ class WardenAgent(ToolChoosingAgent):
     ) -> None:
         """``instructions`` are optional operator tips appended to the role
         instructions (see :func:`app.agents.base.with_tips`). ``api_key`` is
-        required only when ``model_name`` names a BYOK model."""
+        required: every model in the directory is BYOK."""
         super().__init__(
             model_name=model_name,
             instructions=with_tips(WARDEN_INSTRUCTIONS, instructions),

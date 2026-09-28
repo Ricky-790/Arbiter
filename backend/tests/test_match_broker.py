@@ -16,7 +16,13 @@ from app.broker import redis as redis_module
 from app.broker.events import encode_match_event
 from app.broker.redis import get_async_redis, match_events_channel
 from app.db.models import Challenge
-from app.workers.match_worker import build_challenge_spec, default_timeout_seconds
+from app.sandbox.models import ChallengeSpec
+from app.workers.match_worker import (
+    build_challenge_spec,
+    default_timeout_seconds,
+    prisoner_objective,
+    warden_objective,
+)
 
 
 class MatchEventEnvelopeTests(unittest.TestCase):
@@ -25,9 +31,7 @@ class MatchEventEnvelopeTests(unittest.TestCase):
         second = str(uuid4())
 
         self.assertIn(first, match_events_channel(first))
-        self.assertNotEqual(
-            match_events_channel(first), match_events_channel(second)
-        )
+        self.assertNotEqual(match_events_channel(first), match_events_channel(second))
 
     def test_envelope_carries_match_id_and_iso_timestamp(self) -> None:
         match_id = str(uuid4())
@@ -67,6 +71,8 @@ class ChallengeSpecMappingTests(unittest.TestCase):
             sandbox_config={"cpu": 4, "mem_mb": 1024},
             files={"/root/secret.txt": "ARB{test}"},
             env_vars={"GREETING": "hi"},
+            prisoner_hint="Look under /challenge.",
+            warden_hint="Guard /challenge/secret.txt.",
         )
 
         spec = build_challenge_spec(challenge)
@@ -80,6 +86,32 @@ class ChallengeSpecMappingTests(unittest.TestCase):
         self.assertEqual(spec.sandbox.template, "base")
         self.assertEqual(spec.files, {"/root/secret.txt": "ARB{test}"})
         self.assertEqual(spec.environment, {"GREETING": "hi"})
+        self.assertEqual(spec.prisoner_hint, "Look under /challenge.")
+        self.assertEqual(spec.warden_hint, "Guard /challenge/secret.txt.")
+
+    def test_build_challenge_spec_tolerates_missing_hints(self) -> None:
+        """The columns are nullable, so a challenge need not carry briefings."""
+        challenge = Challenge(
+            id=uuid4(),
+            name="No hints",
+            description="Find the flag",
+            win_condition="prisoner_submits_flag",
+            challenge_type="read_secret",
+            verification_config={},
+            flag={},
+            flag_structure={},
+            verifier_script=None,
+            sandbox_config={},
+            files={},
+            env_vars={},
+            prisoner_hint=None,
+            warden_hint=None,
+        )
+
+        spec = build_challenge_spec(challenge)
+
+        self.assertIsNone(spec.prisoner_hint)
+        self.assertIsNone(spec.warden_hint)
 
     def test_build_challenge_spec_carries_verifier_script(self) -> None:
         challenge = Challenge(
@@ -145,3 +177,71 @@ class LoopBoundRedisTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _spec(**overrides: object) -> ChallengeSpec:
+    """A minimal challenge spec, with any field overridden by the caller."""
+    fields: dict[str, object] = {
+        "name": "Assemble the Artifact",
+        "description": "A build service assembles an artifact from shards.",
+        "win_condition": "prisoner_submits_flag",
+        "flag_structure": {"value": "str"},
+    }
+    fields.update(overrides)
+    return ChallengeSpec(**fields)  # type: ignore[arg-type]
+
+
+class ObjectiveHintTests(unittest.TestCase):
+    """Each side's hint reaches that side's prompt and only that side's."""
+
+    def test_the_prisoner_hint_reaches_the_prisoner_objective(self) -> None:
+        spec = _spec(prisoner_hint="Look at how the service is built.")
+
+        self.assertIn(
+            "Briefing: Look at how the service is built.", prisoner_objective(spec)
+        )
+
+    def test_the_warden_hint_reaches_the_warden_objective(self) -> None:
+        spec = _spec(warden_hint="Guard /challenge/vault/artifact.")
+
+        self.assertIn(
+            "Briefing: Guard /challenge/vault/artifact.", warden_objective(spec)
+        )
+
+    def test_hints_are_not_shared_between_the_sides(self) -> None:
+        """The briefings are asymmetric; leaking one would give the game away."""
+        spec = _spec(
+            prisoner_hint="PRISONER-EYES-ONLY",
+            warden_hint="WARDEN-EYES-ONLY",
+        )
+
+        prisoner, warden = prisoner_objective(spec), warden_objective(spec)
+
+        self.assertNotIn("WARDEN-EYES-ONLY", prisoner)
+        self.assertNotIn("PRISONER-EYES-ONLY", warden)
+
+    def test_a_missing_hint_adds_no_briefing_line(self) -> None:
+        spec = _spec()
+
+        self.assertNotIn("Briefing:", prisoner_objective(spec))
+        self.assertNotIn("Briefing:", warden_objective(spec))
+
+    def test_a_blank_hint_adds_no_briefing_line(self) -> None:
+        spec = _spec(prisoner_hint="   \n  ", warden_hint="")
+
+        self.assertNotIn("Briefing:", prisoner_objective(spec))
+        self.assertNotIn("Briefing:", warden_objective(spec))
+
+    def test_a_hint_is_trimmed(self) -> None:
+        spec = _spec(warden_hint="  spaced out  ")
+
+        self.assertIn("Briefing: spaced out", warden_objective(spec))
+        self.assertNotIn("spaced out  ", warden_objective(spec))
+
+    def test_both_objectives_still_carry_the_challenge_framing(self) -> None:
+        spec = _spec(prisoner_hint="p", warden_hint="w")
+
+        for objective in (prisoner_objective(spec), warden_objective(spec)):
+            with self.subTest(objective=objective):
+                self.assertIn("Assemble the Artifact", objective)
+                self.assertIn(spec.description, objective)

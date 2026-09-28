@@ -2,11 +2,12 @@
 
 ## Purpose
 
-This package is Arbiter's infrastructure adapter around Solari.
+This package is Arbiter's infrastructure adapter around a sandbox provider
+(Solari or E2B).
 
 It owns:
 
-- Solari client interaction
+- sandbox provider client interaction
 - sandbox creation/destruction
 - match_id -> sandbox mapping
 - command execution
@@ -19,18 +20,36 @@ It must not own match rules.
 
 ## Components
 
-### `client.py`
+### `solari_client.py` / `e2b_client.py`
 
-`SolariClient` is the thin adapter around the Solari SDK/API.
+`SolariClient` and `E2BClient` are thin adapters over their respective SDKs.
+Both expose the same operations (`create`, `snapshot`, `kill`, `exec_command`,
+`exec_code`, `read_file`, `write_file`, `watch_file`) so `SandboxManager` is
+provider-agnostic; `E2BClient` is the default.
 
-Keep it focused on translating Arbiter calls to Solari operations. Do not put Arbiter match rules here.
+Keep them focused on translating Arbiter calls into provider operations. Do not
+put Arbiter match rules here. When a provider has no counterpart for an
+operation, keep the method for interface parity and leave it inert rather than
+changing the shared shape — `E2BClient.exec_code` is the current example, since
+E2B runs code through a separate interpreter SDK.
 
-The SDK client it caches owns an `httpx` connection pool tied to the event loop
-it first ran on, and a Celery worker serves every match in its own
+Adapter differences worth knowing:
+
+- Solari returns a non-zero exit code as data; E2B raises `CommandExitException`.
+  `E2BClient.exec_command` converts that back into the shared `CommandResult` so
+  callers decide success from `exit_code` alone.
+- E2B snapshots *are* templates: a snapshot id is passed back as `template`
+  rather than through a separate `from_snapshot` argument.
+- E2B watches directories, not files, so `E2BClient.watch_file` widens a file
+  path to its parent and filters events back down to that path.
+
+The Solari SDK client it caches owns an `httpx` connection pool tied to the event
+loop it first ran on, and a Celery worker serves every match in its own
 `asyncio.run()` loop. `SolariClient.client` therefore rebuilds the SDK client
 whenever the running loop changes; never cache a loop-bound client in a plain
 process-wide global, or the second match in a worker process dies with
-`RuntimeError: Event loop is closed`.
+`RuntimeError: Event loop is closed`. E2B builds its client per `create()` call
+and binds it to the returned sandbox, so `E2BClient` needs no such cache.
 
 ### `manager.py`
 
@@ -38,7 +57,7 @@ process-wide global, or the second match in a worker process dies with
 
 It maintains per-process registries keyed by `match_id` and exposes operations used by tools/Engine.
 
-Do not add another generic `SandboxExecution` layer. `SandboxManager` already provides the necessary Arbiter abstraction over `SolariClient`.
+Do not add another generic `SandboxExecution` layer. `SandboxManager` already provides the necessary Arbiter abstraction over the provider clients.
 
 A single `SandboxManager` can be shared by multiple Engine instances in one worker process. It is not a distributed singleton.
 
@@ -98,10 +117,11 @@ itself rather than replaced by a lookup error during cleanup.
 
 ## Snapshots
 
-`SandboxManager.save_snapshot(match_id)` wraps Solari's `Sandbox.snapshot()`. A
-snapshot is self-contained and the sandbox keeps running, so it outlives the
-`destroy_sandbox()` that ends the match; `get_or_create_sandbox(...,
-from_snapshot=...)` boots a new sandbox straight into one.
+`SandboxManager.save_snapshot(match_id)` wraps the provider client's `snapshot`
+operation (Solari's `Sandbox.snapshot()`, E2B's `create_snapshot()`). A snapshot
+is self-contained and outlives the `destroy_sandbox()` that ends the match;
+`get_or_create_sandbox(..., from_snapshot=...)` boots a new sandbox straight
+into one.
 
 Snapshots exist so a fork can open into already-reconstructed state instead of
 replaying a parent match's history again (`app/engine/resumability.py`). The

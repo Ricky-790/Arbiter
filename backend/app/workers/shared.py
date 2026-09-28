@@ -26,6 +26,8 @@ def build_challenge_spec(challenge: Challenge) -> ChallengeSpec:
         name=challenge.name,
         description=challenge.description,
         win_condition=challenge.win_condition,
+        prisoner_hint=challenge.prisoner_hint,
+        warden_hint=challenge.warden_hint,
         sandbox=SandboxConfig(**(challenge.sandbox_config or {})),
         files=dict(challenge.files or {}),
         environment=dict(challenge.env_vars or {}),
@@ -37,9 +39,7 @@ def build_challenge_spec(challenge: Challenge) -> ChallengeSpec:
 
 
 def default_timeout_seconds() -> float:
-    raw = os.getenv(
-        "ARBITER_MATCH_TIMEOUT_SECONDS", str(DEFAULT_MATCH_TIMEOUT_SECONDS)
-    )
+    raw = os.getenv("ARBITER_MATCH_TIMEOUT_SECONDS", str(DEFAULT_MATCH_TIMEOUT_SECONDS))
     try:
         return float(raw)
     except (TypeError, ValueError):

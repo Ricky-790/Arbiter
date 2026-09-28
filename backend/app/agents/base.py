@@ -16,7 +16,12 @@ from pydantic_ai import (
 )
 from pydantic_ai.capabilities import HandleDeferredToolCalls
 from pydantic_ai.exceptions import ModelHTTPError
-from pydantic_ai.messages import ModelMessagesTypeAdapter, UserPromptPart
+from pydantic_ai.messages import (
+    ModelMessagesTypeAdapter,
+    ToolCallPart,
+    ToolReturnPart,
+    UserPromptPart,
+)
 from pydantic_ai.toolsets.external import ExternalToolset
 
 from app.logger import get_logger
@@ -26,6 +31,40 @@ from .tools.models import ToolCall
 from .tools.registry import ToolRegistry
 
 logger = get_logger()
+
+
+def _drop_pending_tool_calls(messages: list[Any]) -> list[Any]:
+    """Drop a trailing model response whose tool calls have no results yet.
+
+    pydantic-ai refuses to start a run when the supplied ``message_history`` ends
+    on unprocessed tool calls (``Cannot provide a new user prompt when the
+    message history contains unprocessed tool calls``), because the model would
+    be asked a fresh question while its own calls were still outstanding.
+
+    That is exactly the shape ``ctx.messages`` has inside the deferred-tool
+    handler: the handler runs *before* the results it returns exist. The
+    conversation pydantic-ai builds is only balanced again once those results
+    are appended, so a snapshot taken there is unusable as a history until then.
+    Trimming the incomplete tail keeps the prefix that is safe to resume from;
+    the calls themselves are still recorded as match events.
+    """
+    trimmed = list(messages)
+    returned = {
+        part.tool_call_id
+        for message in trimmed
+        for part in getattr(message, "parts", ())
+        if isinstance(part, ToolReturnPart)
+    }
+    while trimmed:
+        pending = [
+            part.tool_call_id
+            for part in getattr(trimmed[-1], "parts", ())
+            if isinstance(part, ToolCallPart)
+        ]
+        if not pending or all(tool_call_id in returned for tool_call_id in pending):
+            break
+        trimmed.pop()
+    return trimmed
 
 
 class AgentUnavailableError(Exception):
@@ -162,8 +201,8 @@ class ToolChoosingAgent:
         api_key: str | None = None,
         # _enqueued_messages: list[UserPromptPart] | None = None,
     ) -> None:
-        # Free models resolve from the directory; a BYOK name is built here
-        # from the key the worker redeemed for this match.
+        # Every model is BYOK: the worker redeems the key its side was queued
+        # with and passes it here, where the model client is built.
         model = resolve_model(model_name, api_key)
         self.allowed_tools = allowed_tools
         self.objective = objective
@@ -244,7 +283,12 @@ class ToolChoosingAgent:
         # ends it from inside the very run that would have stored the history,
         # which left both agents with nothing to save. pydantic-ai's own view is
         # already correct up to the request in flight.
-        self._message_history = list(ctx.messages)
+        #
+        # The trailing response is dropped because its tool calls have no
+        # results yet: this handler is what produces them. Keeping it would
+        # leave an unusable history behind if this run never returned, and the
+        # next turn would be rejected outright.
+        self._message_history = _drop_pending_tool_calls(list(ctx.messages))
         # One batch id for every call this response emitted: pydantic-ai puts
         # their results in a single message, so they are atomic to a replay.
         batch_id = str(uuid4())
@@ -302,11 +346,10 @@ class ToolChoosingAgent:
         prompt += f"\nYour scratchpad:\n<scratchpad>{scratchpad}</scratchpad>"
         max_attempts = 3
         last_status: int | None = None
+        history = self._usable_history()
         for attempt in range(1, max_attempts + 1):
             try:
-                result = await self._agent.run(
-                    prompt, message_history=self._message_history
-                )
+                result = await self._agent.run(prompt, message_history=history)
                 self._message_history = result.all_messages()
             except ModelHTTPError as e:
                 status = e.status_code
@@ -372,6 +415,26 @@ class ToolChoosingAgent:
             + (f" (last status {last_status})" if last_status is not None else "")
         )
 
+    def _usable_history(self) -> list[Any]:
+        """The history to resume from, ending on a resolved step.
+
+        Last line of defence for the whole run path. A history left ending on
+        unprocessed tool calls does not fail once -- it fails *every* time,
+        because the Engine's turn loop simply retries after a failed turn, so
+        the agent would be wedged until the match timed out. Dropping the
+        incomplete tail costs the one response that never finished; the calls it
+        contained are still recorded as match events.
+        """
+        history = list(self._message_history or [])
+        trimmed = _drop_pending_tool_calls(history)
+        if len(trimmed) != len(history):
+            logger.warning(
+                "Agent history ended on an unresolved tool call; resuming from "
+                "the last completed step instead of failing every turn"
+            )
+            self._message_history = trimmed
+        return trimmed
+
     def message_history(self) -> list[Any]:
         """This agent's pydantic-ai conversation so far (empty before a run)."""
         return list(self._message_history or [])
@@ -383,9 +446,7 @@ class ToolChoosingAgent:
         parent match, already cut at the fork point, so the model continues
         knowing what it had already tried instead of starting from nothing.
         """
-        self._message_history = list(
-            ModelMessagesTypeAdapter.validate_python(messages)
-        )
+        self._message_history = list(ModelMessagesTypeAdapter.validate_python(messages))
 
     def inject_message(self, message: str):
         self._enqueued_messages.append(UserPromptPart(message))

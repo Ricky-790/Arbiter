@@ -1,4 +1,4 @@
-"""The model directory: free models and BYOK model construction."""
+"""The model directory: the provider/model catalogue every side is built from."""
 
 import os
 import unittest
@@ -9,114 +9,134 @@ from pydantic_ai.models.openrouter import OpenRouterModel
 from pydantic_ai.providers.openrouter import OpenRouterProvider
 
 from app.agents.agents_directory import (
-    BYOK_MODEL_NAMES,
+    PROVIDER_MODELS,
     PROVIDERS,
     ProviderSpec,
-    agent_mapper,
     build_agent,
-    is_byok_model,
-    resolve_byok_provider,
+    is_curated_model,
+    join_model_name,
+    models_for,
     resolve_model,
-    split_model_name,
+    resolve_provider,
 )
 
-
-class ByokCatalogueTests(unittest.TestCase):
-    def test_catalogue_covers_the_requested_providers(self) -> None:
-        counts: dict[str, int] = {}
-        for name in BYOK_MODEL_NAMES:
-            prefix, _, _ = name.partition(":")
-            counts[prefix] = counts.get(prefix, 0) + 1
-
-        self.assertEqual(counts["openai"], 3)
-        self.assertEqual(counts["anthropic"], 3)
-        # OpenRouter is an open-ended list that gets extended as models are
-        # vetted, so only its presence is pinned.
-        self.assertGreaterEqual(counts["openrouter"], 1)
-        # The DeepSeek entries are commented out for now. The provider stays
-        # wired up, so re-enabling them is uncommenting two lines.
-        self.assertNotIn("deepseek", counts)
-        self.assertIn("deepseek", PROVIDERS)
-
-    def test_every_catalogue_name_resolves(self) -> None:
-        for name in BYOK_MODEL_NAMES:
-            with self.subTest(name=name):
-                prefix, _, _ = name.partition(":")
-                spec, model_name = resolve_byok_provider(name)
-
-                self.assertIsInstance(spec, ProviderSpec)
-                self.assertIs(spec, PROVIDERS[prefix])
-                self.assertNotEqual(model_name, "")
-                self.assertTrue(is_byok_model(name))
-
-    def test_free_models_are_not_byok(self) -> None:
-        for name in agent_mapper:
-            with self.subTest(name=name):
-                self.assertFalse(is_byok_model(name))
-
-    def test_unresolvable_names_are_not_byok(self) -> None:
-        for name in ("gpt-4o", "nope:gpt-4o", "openai:", ":", ""):
-            with self.subTest(name=name):
-                self.assertFalse(is_byok_model(name))
+#: Every offered pair, as ``(provider, model)``.
+CATALOGUE = [
+    (provider, model)
+    for provider, models in PROVIDER_MODELS.items()
+    for model in models
+]
 
 
-class ResolveByokProviderTests(unittest.TestCase):
+class CatalogueTests(unittest.TestCase):
+    def test_only_the_offered_providers_are_present(self) -> None:
+        self.assertEqual(
+            set(PROVIDER_MODELS), {"openai", "anthropic", "google", "openrouter"}
+        )
+        self.assertEqual(set(PROVIDERS), set(PROVIDER_MODELS))
+
+    def test_every_provider_offers_at_least_one_model(self) -> None:
+        for provider, models in PROVIDER_MODELS.items():
+            with self.subTest(provider=provider):
+                self.assertGreaterEqual(len(models), 1)
+
+    def test_the_catalogue_has_no_duplicate_pairs(self) -> None:
+        self.assertEqual(len(CATALOGUE), len(set(CATALOGUE)))
+
+    def test_models_for_returns_a_copy_and_tolerates_an_unknown_provider(
+        self,
+    ) -> None:
+        models = models_for("openai")
+        models.append("injected")
+        self.assertNotIn("injected", PROVIDER_MODELS["openai"])
+        self.assertEqual(models_for("nope"), [])
+
+
+class JoinModelNameTests(unittest.TestCase):
+    def test_every_catalogue_pair_joins(self) -> None:
+        for provider, model in CATALOGUE:
+            with self.subTest(provider=provider, model=model):
+                self.assertEqual(
+                    join_model_name(provider, model), f"{provider}:{model}"
+                )
+
+    def test_an_openrouter_model_keeps_its_slash(self) -> None:
+        self.assertEqual(
+            join_model_name("openrouter", "meta-llama/llama-3.3-70b-instruct"),
+            "openrouter:meta-llama/llama-3.3-70b-instruct",
+        )
+
+    def test_a_pasted_model_under_a_known_provider_joins(self) -> None:
+        """The curated list is suggestions; a pasted name is not rejected here.
+
+        Whether the name is real is decided by ``check_model_exists`` against the
+        provider, not by this function.
+        """
+        self.assertEqual(
+            join_model_name("openai", "some-model-we-have-not-curated"),
+            "openai:some-model-we-have-not-curated",
+        )
+
+    def test_an_unknown_provider_or_blank_model_is_rejected(self) -> None:
+        for provider, model in (
+            ("nope", "gpt-4o"),
+            ("", "gpt-4o"),
+            ("openai", ""),
+            ("nvidia", "laguna-xs-2.1"),
+        ):
+            with self.subTest(provider=provider, model=model):
+                self.assertIsNone(join_model_name(provider, model))
+
+    def test_a_model_is_not_portable_between_providers(self) -> None:
+        """The curated list is per provider, so membership does not carry over."""
+        self.assertTrue(is_curated_model("openai", "gpt-4o"))
+        self.assertFalse(is_curated_model("google", "gpt-4o"))
+
+
+class ResolveProviderTests(unittest.TestCase):
     def test_provider_and_model_are_separated_without_a_key(self) -> None:
-        spec, model_name = resolve_byok_provider("openrouter:gpt-4o")
+        spec, model_name = resolve_provider("openrouter:openai/gpt-4o")
 
         self.assertIs(spec.provider, OpenRouterProvider)
         self.assertIs(spec.model, OpenRouterModel)
-        self.assertEqual(model_name, "gpt-4o")
+        self.assertEqual(model_name, "openai/gpt-4o")
 
-    def test_slashes_in_the_model_name_are_kept(self) -> None:
-        spec, model_name = resolve_byok_provider(
-            "openrouter:meta-llama/llama-3.3-70b-instruct"
-        )
+    def test_every_catalogue_name_resolves_to_its_provider_spec(self) -> None:
+        for provider, model in CATALOGUE:
+            with self.subTest(provider=provider, model=model):
+                spec, model_name = resolve_provider(f"{provider}:{model}")
 
-        self.assertIs(spec.provider, OpenRouterProvider)
-        self.assertEqual(model_name, "meta-llama/llama-3.3-70b-instruct")
+                self.assertIsInstance(spec, ProviderSpec)
+                self.assertIs(spec, PROVIDERS[provider])
+                self.assertEqual(model_name, model)
 
-    def test_malformed_and_unknown_names_are_rejected(self) -> None:
+    def test_malformed_and_unknown_providers_are_rejected(self) -> None:
         for name in (
             "",
             "gpt-4o",
             "openai:",
             ":gpt-4o",
             "nope:gpt-4o",
-            "deepseek:deepseek-nope",
+            # A provider that is no longer wired up.
+            "deepseek:deepseek-chat",
         ):
-            with self.subTest(name=name):
-                with self.assertRaises(ValueError):
-                    resolve_byok_provider(name)
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                resolve_provider(name)
 
+    def test_an_uncurated_model_still_resolves(self) -> None:
+        """Building a client is not a validity check; the provider decides that."""
+        spec, model_name = resolve_provider("openai:not-a-curated-model")
 
-class SplitModelNameTests(unittest.TestCase):
-    def test_free_names_split_on_the_slash(self) -> None:
-        self.assertEqual(
-            split_model_name("nvidia/laguna-xs-2.1"), ("nvidia", "laguna-xs-2.1")
-        )
-
-    def test_byok_names_split_on_the_colon(self) -> None:
-        self.assertEqual(
-            split_model_name("openai:gpt-4o-mini"), ("openai", "gpt-4o-mini")
-        )
-
-    def test_byok_openrouter_keeps_its_slash_in_the_model(self) -> None:
-        self.assertEqual(
-            split_model_name("openrouter:qwen/qwen-2.5-72b-instruct"),
-            ("openrouter", "qwen/qwen-2.5-72b-instruct"),
-        )
-
-    def test_an_unrecognised_name_is_unknown(self) -> None:
-        self.assertEqual(split_model_name("junk"), ("unknown", "junk"))
+        self.assertIs(spec, PROVIDERS["openai"])
+        self.assertEqual(model_name, "not-a-curated-model")
 
 
 def configured_key(model: object) -> object:
     """The API key a built model's SDK client was constructed with.
 
-    Providers differ: the OpenAI-compatible clients (OpenAI, DeepSeek,
-    OpenRouter) expose ``api_key`` directly, while the Google client nests it
-    under ``_api_client``.
+    Providers differ: the OpenAI-compatible clients (OpenAI, OpenRouter) expose
+    ``api_key`` directly, while the Google client nests it under
+    ``_api_client``.
     """
     client = model.provider.client  # type: ignore[attr-defined]
     if hasattr(client, "api_key"):
@@ -126,14 +146,16 @@ def configured_key(model: object) -> object:
 
 class BuildAgentTests(unittest.TestCase):
     def test_every_catalogue_name_builds_an_agent(self) -> None:
-        for name in BYOK_MODEL_NAMES:
-            with self.subTest(name=name):
-                self.assertIsInstance(build_agent(name, "test-key"), Agent)
+        for provider, model in CATALOGUE:
+            with self.subTest(provider=provider, model=model):
+                self.assertIsInstance(
+                    build_agent(f"{provider}:{model}", "test-key"), Agent
+                )
 
     def test_the_supplied_key_reaches_the_provider_client(self) -> None:
-        for name in BYOK_MODEL_NAMES:
-            with self.subTest(name=name):
-                agent = build_agent(name, "sk-explicit-123")
+        for provider, model in CATALOGUE:
+            with self.subTest(provider=provider, model=model):
+                agent = build_agent(f"{provider}:{model}", "sk-explicit-123")
                 # ``Agent.model`` -> provider -> SDK client, as constructed.
                 self.assertEqual(configured_key(agent.model), "sk-explicit-123")
 
@@ -146,20 +168,24 @@ class BuildAgentTests(unittest.TestCase):
 
 
 class ResolveModelTests(unittest.TestCase):
-    def test_free_models_resolve_from_the_directory(self) -> None:
-        for name, model in agent_mapper.items():
-            with self.subTest(name=name):
-                self.assertIs(resolve_model(name), model)
-
-    def test_byok_names_need_a_key_and_use_it(self) -> None:
+    def test_a_catalogue_name_resolves_with_the_callers_key(self) -> None:
         model = resolve_model("openai:gpt-4o-mini", "sk-byok")
 
         self.assertEqual(configured_key(model), "sk-byok")
 
-    def test_a_key_for_a_free_model_is_rejected(self) -> None:
-        with self.assertRaises(ValueError):
-            resolve_model("nvidia/laguna-xs-2.1", "sk-unnecessary")
+    def test_a_missing_key_is_rejected(self) -> None:
+        """Every model is BYOK, so there is no keyless path to resolve."""
+        for api_key in (None, ""):
+            with self.subTest(api_key=api_key):
+                with self.assertRaises(ValueError):
+                    resolve_model("openai:gpt-4o-mini", api_key)
 
-    def test_an_unknown_model_is_rejected(self) -> None:
+    def test_an_unknown_provider_is_rejected_even_with_a_key(self) -> None:
         with self.assertRaises(ValueError):
-            resolve_model("nope:gpt-4o", None)
+            resolve_model("nope:gpt-4o", "sk-byok")
+
+    def test_an_uncurated_model_is_built_rather_than_rejected(self) -> None:
+        """Existence is the provider's call, made by ``check_model_exists``."""
+        model = resolve_model("openai:a-model-we-have-not-curated", "sk-byok")
+
+        self.assertEqual(configured_key(model), "sk-byok")

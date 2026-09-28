@@ -74,6 +74,13 @@ class ChallengeSpec(BaseModel):
     description: str
     win_condition: str = "prisoner_submits_flag"
 
+    # Optional role-specific starting briefings written by the challenge author.
+    # They are asymmetric on purpose: each side is told only what that role
+    # starts out knowing, and neither sees the other's. Both are folded into the
+    # matching agent's objective.
+    prisoner_hint: str | None = None
+    warden_hint: str | None = None
+
     # Environment configuration
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
 

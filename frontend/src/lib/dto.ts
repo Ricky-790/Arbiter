@@ -66,25 +66,50 @@ export type MatchEventSchema = {
 /** `StartMatchRequest` — body for `POST /api/v1/matches/start-match`. */
 export type StartMatchRequest = {
   challenge_id: string;
+  /** Each side names its provider and model separately. */
+  prisoner_provider: string;
   prisoner_model: string;
+  warden_provider: string;
   warden_model: string;
   /** Optional operator tips appended to the agent's role instructions. */
   prisoner_suggestions: string | null;
   warden_suggestions: string | null;
   /**
-   * Provider key for a side using a BYOK model; used for that match only.
-   * `null` for a free model, which runs on the deployment's own key.
+   * Provider key for each side, used for that match only. Every model is BYOK,
+   * so both are required.
    */
   prisoner_api_key: string | null;
   warden_api_key: string | null;
 };
 
-/** `AvailableModelsResponse` — selectable models, grouped by key requirement. */
+/** `ProviderModels` — one provider and the models it offers, in display order. */
+export type ProviderModels = {
+  provider: string;
+  models: string[];
+};
+
+/** `AvailableModelsResponse` — the selectable catalogue, nested by provider. */
 export type AvailableModelsResponse = {
-  /** Run on the deployment's own provider keys. */
-  free_models: string[];
-  /** Need a key for that side, supplied in `StartMatchRequest`. */
-  byok_models: string[];
+  providers: ProviderModels[];
+};
+
+/** `ModelCheckRequest` — body for `POST /api/v1/matches/verify-model`. */
+export type ModelCheckRequest = {
+  provider: string;
+  model: string;
+  api_key: string;
+};
+
+/**
+ * `ModelCheckResponse` — whether a model name was confirmed with its provider.
+ *
+ * `exists: false` is a normal answer, not an error, so the reason can be shown
+ * beside the field. `reason` is `not_found`, `key_rejected` or `unreachable`.
+ */
+export type ModelCheckResponse = {
+  exists: boolean;
+  reason: string | null;
+  detail: string | null;
 };
 
 /** `StartMatchResponse` — acknowledged queued match. */
@@ -121,8 +146,10 @@ export type ForkSchema = {
 /** `ForkDetailSchema` — a fork plus everything the fork page starts a match from. */
 export type ForkDetailSchema = ForkSchema & {
   challenge_id: string;
-  /** The parent match's models, offered as the picker's starting point. */
+  /** The parent match's choices, offered as the picker's starting point. */
+  prisoner_provider: string | null;
   prisoner_model: string | null;
+  warden_provider: string | null;
   warden_model: string | null;
   /** The tool-call history behind the branch point. */
   latest_turns: MatchEventSchema[];
@@ -147,7 +174,9 @@ export type ForkListResponse = PaginationMeta & {
  */
 export type StartForkMatchRequest = {
   fork_id: string;
+  prisoner_provider: string;
   prisoner_model: string;
+  warden_provider: string;
   warden_model: string;
   prisoner_suggestions: string | null;
   warden_suggestions: string | null;

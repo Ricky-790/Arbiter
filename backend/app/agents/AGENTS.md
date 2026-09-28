@@ -15,22 +15,42 @@ It decides **what an agent wants to do**.
 
 It does not decide whether an action is legal in the match.
 
-## Models: free and BYOK
+## Models: always BYOK
 
-`agents_directory.py` owns both kinds of model, and `resolve_model()` is the
-only entry point the agent runtime uses.
+`agents_directory.py` owns the catalogue, and `resolve_model()` is the only
+entry point the agent runtime uses.
 
-- **Free models** — `agent_mapper` maps a `provider/model` name onto a `Model`
-  built from this deployment's own keys (NVIDIA, Google, OpenRouter). These are
-  what `GET /matches/free-models` offers and they need no user key.
-- **BYOK models** — `BYOK_MODEL_NAMES` are `provider:model` names served by
-  `build_model()`, which takes the caller's API key as an argument. Covers
-  `openai`, `anthropic`, `deepseek`, `openrouter`, `google`.
+`PROVIDERS` maps a provider name onto the pydantic-ai provider/model classes
+that serve it, and `PROVIDER_MODELS` lists *suggested* models per provider. The
+picker chooses a provider and a model separately; the two are stored separately
+on the `matches` row and joined into the canonical `provider:model` that
+`resolve_model()` resolves.
 
-Never read a BYOK key from the environment and never assign one to one. Keys
+**`PROVIDER_MODELS` is not a whitelist.** An operator may paste any model name
+under a known provider, so `join_model_name()` only checks the provider and that
+the model is non-blank. Whether a name is real is decided by
+`check_model_exists()`, which reads the provider's own model list using the
+caller's key and raises `ModelCheckError` with a reason of `not_found`,
+`key_rejected` or `unreachable`. The curated names exist only so the picker is
+not empty: only OpenRouter publishes a keyless list.
+
+This check is not cosmetic. The worker claims a sandbox before the first model
+call, so a name that only failed at generation time would occupy a scarce
+sandbox and produce nothing. `POST /matches/verify-model` answers the UI while
+the operator types, and both start routes verify again before queueing (fail
+closed, including when the provider cannot be reached).
+
+**Every model is BYOK.** Arbiter holds no provider credentials for agent models:
+there is no free tier and no `agent_mapper`. `build_model()` takes the caller's
+API key as an argument, and `resolve_model()` rejects a missing key rather than
+falling back to anything.
+
+Never read a provider key from the environment and never assign one to one. Keys
 arrive per match from the request body, travel to the worker through the
 encrypted store in `app/secrets`, and are passed to `ToolChoosingAgent(api_key=)`.
-`resolve_model()` rejects a key passed for a free model rather than ignoring it.
+A provider's own error text is never surfaced to the caller, because it can echo
+the request URL and some SDKs put the key there; the cache is keyed by a digest
+so no key is retained.
 
 ## Agent/runtime boundary
 
@@ -85,6 +105,23 @@ The class should not:
 - decide winners
 - inspect opponent state
 - implement match lifecycle
+
+### Message history must stay resumable
+
+A stored history must never end on a model response whose tool calls have no
+results. pydantic-ai refuses to start a run from one
+(`Cannot provide a new user prompt when the message history contains unprocessed
+tool calls`), and because the Engine's turn loop retries after a failed turn, the
+agent would fail identically on *every* later turn until the match timed out.
+
+The deferred-tool handler is the dangerous place: it runs *before* the results it
+returns exist, so pydantic-ai's view at that moment ends on exactly that shape.
+Anything snapshotting the conversation there must trim the incomplete tail
+(`_drop_pending_tool_calls`). `run_turn` also repairs the history before each
+run, so a damaged history costs one unfinished response rather than the match.
+
+Dropping that tail loses only the in-flight response. The tool calls it carried
+are still recorded as match events, which is what a fork replays from.
 
 ## Tool definitions
 

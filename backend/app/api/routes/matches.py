@@ -15,11 +15,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
 from app.agents.agents_directory import (
-    BYOK_MODEL_NAMES,
-    agent_mapper,
-    is_byok_model,
+    PROVIDERS,
+    ModelCheckError,
+    check_model_exists,
     join_model_name,
-    split_model_name,
+    models_for,
 )
 from app.api.schemas.dto_models import (
     AvailableModelsResponse,
@@ -31,6 +31,9 @@ from app.api.schemas.dto_models import (
     MatchEventSchema,
     MatchListResponse,
     MatchListSchema,
+    ModelCheckRequest,
+    ModelCheckResponse,
+    ProviderModels,
     StartForkMatchRequest,
     StartMatchRequest,
     StartMatchResponse,
@@ -75,16 +78,19 @@ SSE_HEADERS = {
 }
 
 
-@router.get("/free-models", response_model=AvailableModelsResponse)
+@router.get("/models", response_model=AvailableModelsResponse)
 async def list_models() -> AvailableModelsResponse:
-    """Return the models this deployment can host, grouped by key requirement.
+    """Return the providers Arbiter can run and the models each one offers.
 
-    ``free_models`` run on the deployment's own provider keys; ``byok_models``
-    require the caller to send an API key for that side when starting a match.
+    The picker chooses a provider first and then a model, so the catalogue is
+    nested rather than flattened. Every model is BYOK: the caller must send that
+    provider's key for the side using it when starting a match.
     """
     return AvailableModelsResponse(
-        free_models=list(agent_mapper),
-        byok_models=list(BYOK_MODEL_NAMES),
+        providers=[
+            ProviderModels(provider=provider, models=models_for(provider))
+            for provider in PROVIDERS
+        ]
     )
 
 
@@ -161,57 +167,64 @@ async def start_match(
     The caller can subscribe to ``/spectate?match_id=...`` right away; the
     worker picks the request off the queue and hosts the match.
 
-    A BYOK model needs the key for its side in this body. The key is written to
-    the encrypted short-lived store and only the match id goes on the queue, so
-    the credential is never part of a queued message or a match row.
+    Every model is BYOK, so both sides need a key in this body. The keys are
+    written to the encrypted short-lived store and only the match id goes on the
+    queue, so no credential is ever part of a queued message or a match row.
     """
     challenge = await session.get(Challenge, payload.challenge_id)
     if challenge is None:
         raise HTTPException(status_code=404, detail="Challenge not found")
 
-    prisoner_key = _byok_key(
-        payload.prisoner_model, payload.prisoner_api_key, "prisoner"
+    # Both sides are confirmed with their providers concurrently: each check is
+    # a network round trip, and the two are independent.
+    prisoner_key, warden_key = await asyncio.gather(
+        _resolve_side(
+            payload.prisoner_provider,
+            payload.prisoner_model,
+            payload.prisoner_api_key,
+            "prisoner",
+        ),
+        _resolve_side(
+            payload.warden_provider,
+            payload.warden_model,
+            payload.warden_api_key,
+            "warden",
+        ),
     )
-    warden_key = _byok_key(payload.warden_model, payload.warden_api_key, "warden")
 
     match_id = uuid4()
-    prisoner_provider, prisoner_model = split_model_name(payload.prisoner_model)
-    warden_provider, warden_model = split_model_name(payload.warden_model)
 
     # Stored before anything is queued: if the store is unavailable the request
     # fails here rather than leaving a match that can never build its agents.
-    if prisoner_key is not None or warden_key is not None:
-        try:
-            if prisoner_key is not None:
-                await store_api_key(match_id, PRISONER, prisoner_key)
-            if warden_key is not None:
-                await store_api_key(match_id, WARDEN, warden_key)
-        except ByokStoreError as error:
-            logger.error(f"BYOK key store unavailable: {error}")
-            raise HTTPException(
-                status_code=503, detail="BYOK key storage is unavailable"
-            ) from error
+    try:
+        await store_api_key(match_id, PRISONER, prisoner_key)
+        await store_api_key(match_id, WARDEN, warden_key)
+    except ByokStoreError as error:
+        logger.error(f"Provider key store unavailable: {error}")
+        raise HTTPException(
+            status_code=503, detail="Provider key storage is unavailable"
+        ) from error
 
     await matches_service.create_queued_match(
         session,
         match_id=match_id,
         challenge_id=payload.challenge_id,
-        prisoner_model=prisoner_model,
-        prisoner_provider=prisoner_provider,
-        warden_model=warden_model,
-        warden_provider=warden_provider,
+        prisoner_model=payload.prisoner_model,
+        prisoner_provider=payload.prisoner_provider,
+        warden_model=payload.warden_model,
+        warden_provider=payload.warden_provider,
         win_condition=challenge.win_condition,
     )
 
     message = MatchStartMessage(
         match_id=match_id,
         challenge_id=payload.challenge_id,
+        prisoner_provider=payload.prisoner_provider,
         prisoner_model=payload.prisoner_model,
+        warden_provider=payload.warden_provider,
         warden_model=payload.warden_model,
         prisoner_suggestions=payload.prisoner_suggestions,
         warden_suggestions=payload.warden_suggestions,
-        prisoner_byok=prisoner_key is not None,
-        warden_byok=warden_key is not None,
     )
     try:
         # Celery's client is blocking; keep the request loop free.
@@ -365,10 +378,10 @@ async def get_fork(
         status=fork.status,
         created_at=fork.created_at,
         challenge_id=parent.challenge_id,
-        prisoner_model=join_model_name(
-            parent.prisoner_provider, parent.prisoner_model
-        ),
-        warden_model=join_model_name(parent.warden_provider, parent.warden_model),
+        prisoner_provider=parent.prisoner_provider,
+        prisoner_model=parent.prisoner_model,
+        warden_provider=parent.warden_provider,
+        warden_model=parent.warden_model,
         latest_turns=[
             MatchEventSchema.model_validate(event) for event in history.turns
         ],
@@ -410,35 +423,42 @@ async def start_from_fork(
     if parent is None:
         raise HTTPException(status_code=404, detail="Parent match not found")
 
-    prisoner_key = _byok_key(
-        payload.prisoner_model, payload.prisoner_api_key, "prisoner"
+    # Both sides are confirmed with their providers concurrently: each check is
+    # a network round trip, and the two are independent.
+    prisoner_key, warden_key = await asyncio.gather(
+        _resolve_side(
+            payload.prisoner_provider,
+            payload.prisoner_model,
+            payload.prisoner_api_key,
+            "prisoner",
+        ),
+        _resolve_side(
+            payload.warden_provider,
+            payload.warden_model,
+            payload.warden_api_key,
+            "warden",
+        ),
     )
-    warden_key = _byok_key(payload.warden_model, payload.warden_api_key, "warden")
 
     match_id = uuid4()
-    prisoner_provider, prisoner_model = split_model_name(payload.prisoner_model)
-    warden_provider, warden_model = split_model_name(payload.warden_model)
 
-    if prisoner_key is not None or warden_key is not None:
-        try:
-            if prisoner_key is not None:
-                await store_api_key(match_id, PRISONER, prisoner_key)
-            if warden_key is not None:
-                await store_api_key(match_id, WARDEN, warden_key)
-        except ByokStoreError as error:
-            logger.error(f"BYOK key store unavailable: {error}")
-            raise HTTPException(
-                status_code=503, detail="BYOK key storage is unavailable"
-            ) from error
+    try:
+        await store_api_key(match_id, PRISONER, prisoner_key)
+        await store_api_key(match_id, WARDEN, warden_key)
+    except ByokStoreError as error:
+        logger.error(f"Provider key store unavailable: {error}")
+        raise HTTPException(
+            status_code=503, detail="Provider key storage is unavailable"
+        ) from error
 
     await matches_service.create_queued_match(
         session,
         match_id=match_id,
         challenge_id=parent.challenge_id,
-        prisoner_model=prisoner_model,
-        prisoner_provider=prisoner_provider,
-        warden_model=warden_model,
-        warden_provider=warden_provider,
+        prisoner_model=payload.prisoner_model,
+        prisoner_provider=payload.prisoner_provider,
+        warden_model=payload.warden_model,
+        warden_provider=payload.warden_provider,
         win_condition=parent.win_condition,
         # The fork's own branch point, so the match worker knows what to resume.
         parent_match_id=fork.parent_match_id,
@@ -448,12 +468,12 @@ async def start_from_fork(
     message = MatchStartMessage(
         match_id=match_id,
         challenge_id=parent.challenge_id,
+        prisoner_provider=payload.prisoner_provider,
         prisoner_model=payload.prisoner_model,
+        warden_provider=payload.warden_provider,
         warden_model=payload.warden_model,
         prisoner_suggestions=payload.prisoner_suggestions,
         warden_suggestions=payload.warden_suggestions,
-        prisoner_byok=prisoner_key is not None,
-        warden_byok=warden_key is not None,
     )
     try:
         await run_in_threadpool(enqueue_match_start, message)
@@ -469,32 +489,69 @@ async def start_from_fork(
     return StartMatchResponse(match_id=match_id, status="queued")
 
 
-def _byok_key(model_name: str, secret: SecretStr | None, side: str) -> str | None:
-    """Return the API key this side must use, or ``None`` for a free model.
+@router.post("/verify-model", response_model=ModelCheckResponse)
+async def verify_model(payload: ModelCheckRequest) -> ModelCheckResponse:
+    """Confirm a provider actually serves a model before it is ever queueable.
+
+    The picker lets an operator paste any model name, and the worker claims a
+    sandbox before its first model call. Without this check a mistyped name
+    would occupy that sandbox and fail with nothing to show, so the answer here
+    gates both the UI and ``start-match``.
+
+    A model that cannot be confirmed is reported as ``exists: false`` rather
+    than an HTTP error: it is an answer to a question, not a failed request.
+    """
+    api_key = payload.api_key.get_secret_value().strip()
+    if not api_key:
+        return ModelCheckResponse(
+            exists=False,
+            reason="key_rejected",
+            detail=(
+                f"An API key is required to check {payload.provider} model names"
+            ),
+        )
+    try:
+        await check_model_exists(payload.provider, payload.model, api_key)
+    except ModelCheckError as error:
+        return ModelCheckResponse(
+            exists=False, reason=error.reason, detail=error.detail
+        )
+    return ModelCheckResponse(exists=True)
+
+
+async def _resolve_side(
+    provider: str, model: str, secret: SecretStr | None, side: str
+) -> str:
+    """Validate one side's provider/model choice and return its API key.
 
     Raises:
-        HTTPException: 400 if the model is unknown, or if it is a BYOK model
-            and no key came with the request.
+        HTTPException: 400 if the provider is unknown, if no key came with the
+            request, or if the provider does not serve the model. Every model is
+            BYOK, so the key is always required, and the model is confirmed with
+            the provider so an unusable name is rejected before it is queued.
     """
-    key = secret.get_secret_value().strip() if secret is not None else ""
-    if is_byok_model(model_name):
-        if not key:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Model {model_name!r} is a BYOK model; "
-                    f"{side}_api_key is required"
-                ),
-            )
-        return key
-    if model_name not in agent_mapper:
-        raise HTTPException(status_code=400, detail=f"Unknown model {model_name!r}")
-    if key:
-        # Never log the value, only the fact that it was not needed.
-        logger.warning(
-            f"Ignoring {side} API key supplied for free model {model_name!r}"
+    if join_model_name(provider, model) is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unknown provider {provider!r} for the {side}; available "
+                "providers are listed by GET /api/v1/matches/models"
+            ),
         )
-    return None
+    key = secret.get_secret_value().strip() if secret is not None else ""
+    if not key:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Model {provider}:{model} is BYOK; {side}_api_key is required",
+        )
+    try:
+        await check_model_exists(provider, model, key)
+    except ModelCheckError as error:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{side}: {error.detail}",
+        ) from error
+    return key
 
 
 async def _discard_byok_keys(match_id: UUID) -> None:

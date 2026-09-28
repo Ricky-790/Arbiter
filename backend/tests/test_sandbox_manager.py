@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 from solari_core import ConcurrencyLimitError
 
-from app.sandbox.client import SolariClient
+from app.sandbox.solari_client import SolariClient
 from app.sandbox.manager import SandboxManager
 from app.sandbox.models import CommandResult, SandboxConfig
 
@@ -202,7 +202,7 @@ class SolariClientLoopTests(unittest.TestCase):
         async def twice_in_one_loop() -> tuple[object, object]:
             return client.client, client.client
 
-        with patch("app.sandbox.client.SandboxClient", FakeSandboxClient):
+        with patch("app.sandbox.solari_client.SandboxClient", FakeSandboxClient):
             first_match = asyncio.run(current())
             same_match = asyncio.run(twice_in_one_loop())
             second_match = asyncio.run(current())
