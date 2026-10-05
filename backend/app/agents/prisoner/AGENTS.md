@@ -50,6 +50,17 @@ when it decides a discovery, plan, or other information is worth preserving.
 
 Do not force scratchpad usage.
 
+## Boundaries
+
+The Prisoner has no root, so `/home/warden` is genuinely unreachable — mode
+`0700` on the Warden's home, enforced by the OS, blocks `bash`, `read_file` and
+`write_file` alike. The instructions say so, because an agent that keeps trying
+burns turns and credits on a wall.
+
+The Prisoner's `bash` output is also capped (`PRISONER_BASH_OUTPUT_CHARS`,
+4000). The cap is the Engine's, not the tool's, and the result says how much was
+dropped; see `app/agents/tools/AGENTS.md`.
+
 ## Rules
 
 - Do not put match/game rules here.

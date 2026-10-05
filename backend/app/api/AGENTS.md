@@ -115,6 +115,11 @@ and the key goes in the body so it cannot reach a URL, a log or browser history.
 - The response is `text/event-stream`: `review_started`, then a
   `review_tool_call`/`review_tool_result` pair per read the agent makes, then
   exactly one `review_finished` (carrying the strategy) or `review_error`.
+- The stream sends `: keep-alive` comments whenever it would otherwise be idle
+  for `REVIEW_KEEP_ALIVE_SECONDS` (15s). This is not cosmetic: a provider retry
+  is a 45s silence, and a connection dropped for idling cancels the review — so
+  without the comments a recoverable 429 becomes a lost run. Comments carry no
+  `data:` line, so the client skips them and they are not frames.
 - What streams is what the review *does*. It is never the model's private
   reasoning — see `agents/AGENTS.md`, which forbids capturing it.
 - **Nothing is saved.** The strategy is returned as a proposal; promoting it is

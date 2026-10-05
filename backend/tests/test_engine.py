@@ -1,13 +1,19 @@
 import asyncio
 import unittest
+from datetime import datetime, timedelta
 
 from solari_core import ConcurrencyLimitError
 
 from app.agents.base import AgentUnavailableError
 from app.agents.models import AgentType
-from app.agents.tools import ToolCall, ToolResult
+from app.agents.tools import (
+    PRISONER_BASH_OUTPUT_CHARS,
+    ToolCall,
+    ToolResult,
+)
 from app.engine import Engine, MatchStatus
 from app.engine.engine import WARDEN_SUDOERS_PATH
+from app.engine.models import utc_now
 from app.sandbox.models import ChallengeSpec, SandboxEvent, SandboxEventType
 
 
@@ -122,13 +128,57 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         commands = engine._setup_commands()
 
         self.assertTrue(any("useradd" in c and "warden" in c for c in commands))
-        self.assertEqual(commands[-1], "nohup /tmp/service.sh &")
+        # The challenge's own script still runs, but home isolation is appended
+        # after it so nothing the challenge does can reopen a home directory.
+        self.assertIn("nohup /tmp/service.sh &", commands)
 
         file_commands = [c for c in commands if "/challenge/hidden/.secret" in c]
         self.assertEqual(len(file_commands), 1)
         self.assertIn("mkdir -p /challenge/hidden", file_commands[0])
         self.assertIn("chown prisoner /challenge/hidden/.secret", file_commands[0])
         self.assertIn("chmod 600 /challenge/hidden/.secret", file_commands[0])
+
+    def test_setup_isolates_each_agents_home_directory(self) -> None:
+        """Mode 700 is what keeps each side out of the other's home.
+
+        ``useradd -m`` leaves the homes world-readable, so without this the
+        Prisoner could read the Warden's scratchpad -- its plan -- and the
+        Warden could read the Prisoner's.
+        """
+        engine = Engine(
+            match_id="setup-homes",
+            challenge=ChallengeSpec(name="t", description="t"),
+            sandbox_manager=FakeSandboxManager(),  # type: ignore[arg-type]
+        )
+
+        commands = engine._setup_commands()
+
+        lockdown = [c for c in commands if "chmod 700" in c]
+        self.assertEqual(len(lockdown), 2)
+        self.assertIn("/home/prisoner", lockdown[0])
+        self.assertIn("chown prisoner /home/prisoner", lockdown[0])
+        self.assertIn("/home/warden", lockdown[1])
+        self.assertIn("chown warden /home/warden", lockdown[1])
+        # Last: nothing after them may loosen a home back up.
+        self.assertEqual(commands[-2:], lockdown)
+
+    def test_home_isolation_follows_the_configured_user_names(self) -> None:
+        engine = Engine(
+            match_id="setup-homes-2",
+            challenge=ChallengeSpec(
+                name="t",
+                description="t",
+                prisoner_user="inmate",
+                warden_user="overseer",
+            ),
+            sandbox_manager=FakeSandboxManager(),  # type: ignore[arg-type]
+        )
+
+        commands = engine._setup_commands()
+
+        self.assertIn("/home/inmate", " ".join(commands))
+        self.assertIn("/home/overseer", " ".join(commands))
+        self.assertNotIn("/home/prisoner", " ".join(commands))
 
     def test_setup_closes_the_empty_root_password_hole(self) -> None:
         """Without this both agents are root, and every other rule is moot."""
@@ -420,6 +470,97 @@ class SideStatsTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsInstance(value, int)
 
 
+class PrisonerBashOutputCapTests(unittest.IsolatedAsyncioTestCase):
+    """One Prisoner bash call cannot return an unbounded amount of output.
+
+    The cap is a Prisoner-side balance rule -- chaining `cat` across several
+    files otherwise dumps a whole filesystem in one charged action -- so it is
+    enforced in the Engine and must not touch the Warden.
+    """
+
+    def make_engine(self) -> tuple[Engine, FakeSandboxManager]:
+        manager = FakeSandboxManager()
+        engine = Engine(
+            match_id="match-cap",
+            challenge=ChallengeSpec(
+                name="test",
+                description="test",
+                flag={"value": "ARB{flag}"},
+                flag_structure={"value": "str"},
+            ),
+            sandbox_manager=manager,  # type: ignore[arg-type]
+        )
+        return engine, manager
+
+    def stub_output(self, manager: FakeSandboxManager, output: str) -> None:
+        async def run_command(**kwargs: object) -> ToolResult:
+            return ToolResult(success=True, output=output, exit_code=0)
+
+        manager.run_command = run_command  # type: ignore[method-assign]
+
+    async def test_the_prisoners_bash_output_is_truncated_to_the_cap(self) -> None:
+        engine, manager = self.make_engine()
+        await engine.start()
+        self.stub_output(manager, "x" * (PRISONER_BASH_OUTPUT_CHARS + 500))
+
+        result = await engine.execute_tool_call(
+            AgentType.PRISONER,
+            ToolCall(name="bash", arguments={"command": "cat a b c d e"}),
+        )
+
+        self.assertTrue(result.success)
+        self.assertLess(len(result.output), PRISONER_BASH_OUTPUT_CHARS + 200)
+        # The Agent must be able to tell that what it got is incomplete.
+        self.assertIn("truncated", result.output)
+        self.assertIn("500 more characters", result.output)
+        self.assertIn("capped", result.notice or "")
+
+    async def test_short_prisoner_output_is_left_alone(self) -> None:
+        engine, manager = self.make_engine()
+        await engine.start()
+        self.stub_output(manager, "total 4\ndrwxr-xr-x 2 prisoner prisoner 4096 .\n")
+
+        result = await engine.execute_tool_call(
+            AgentType.PRISONER,
+            ToolCall(name="bash", arguments={"command": "ls -la"}),
+        )
+
+        self.assertEqual(result.output, "total 4\ndrwxr-xr-x 2 prisoner prisoner 4096 .\n")
+        self.assertIsNone(result.notice)
+
+    async def test_the_wardens_bash_output_is_not_capped(self) -> None:
+        engine, manager = self.make_engine()
+        await engine.start()
+        long_output = "y" * (PRISONER_BASH_OUTPUT_CHARS + 500)
+        self.stub_output(manager, long_output)
+
+        result = await engine.execute_tool_call(
+            AgentType.WARDEN,
+            ToolCall(name="bash", arguments={"command": "cat huge"}),
+        )
+
+        self.assertEqual(result.output, long_output)
+        self.assertIsNone(result.notice)
+
+    async def test_another_prisoner_tool_is_not_capped(self) -> None:
+        """Only bash: read_file has its own much smaller natural bound."""
+        engine, manager = self.make_engine()
+        await engine.start()
+        long_output = "z" * (PRISONER_BASH_OUTPUT_CHARS + 500)
+
+        async def read_file(**kwargs: object) -> ToolResult:
+            return ToolResult(success=True, output=long_output)
+
+        manager.read_file = read_file  # type: ignore[method-assign]
+
+        result = await engine.execute_tool_call(
+            AgentType.PRISONER,
+            ToolCall(name="read_file", arguments={"path": "/challenge/big.txt"}),
+        )
+
+        self.assertEqual(result.output, long_output)
+
+
 class TrapStatsTests(unittest.IsolatedAsyncioTestCase):
     """Trap activity is counted in the Engine, not re-derived by the reviewer."""
 
@@ -433,12 +574,63 @@ class TrapStatsTests(unittest.IsolatedAsyncioTestCase):
                 flag_structure={"value": "str"},
             ),
             sandbox_manager=FakeSandboxManager(),
+            # The trap limit is what these tests exercise, so pacing must not be
+            # what decides whether a second or third arming lands.
+            cooldown_seconds=0,
         )
 
     async def arm(self, engine: Engine, process: str) -> ToolResult:
         return await engine.execute_tool_call(
             AgentType.WARDEN,
             ToolCall(name="auto_kill", arguments={"process": process}),
+        )
+
+    async def watch(
+        self, engine: Engine, path: str, *, at: datetime | None = None
+    ) -> ToolResult:
+        return await engine.execute_tool_call(
+            AgentType.WARDEN,
+            ToolCall(name="watch_file", arguments={"path": path}),
+            replay_at=at,
+        )
+
+    async def test_two_traps_arm_under_the_real_match_cooldown(self) -> None:
+        """The limit must be reachable at the pacing a real match uses.
+
+        The tests above run with no cooldown so the trap limit alone decides.
+        This one keeps the Engine's default 5s action cooldown -- what
+        ``match_worker`` actually constructs -- and drives the clock with
+        ``replay_at``, so it reproduces a real Warden's spacing without waiting.
+
+        It is the regression for the live match where the Warden armed one trap
+        and was refused twice against the old one-slot rule: two armings must
+        land, and the third must be refused for the *limit* rather than quietly
+        for cooldown, which would look identical from the outside.
+        """
+        engine = Engine(
+            match_id="match-traps-paced",
+            challenge=ChallengeSpec(
+                name="test",
+                description="test",
+                flag={"value": "ARB{flag}"},
+                flag_structure={"value": "str"},
+            ),
+            sandbox_manager=FakeSandboxManager(),
+        )
+        await engine.start()
+        base = utc_now()
+
+        # 5s cooldown, so each arming is separated by more than that.
+        first = await self.watch(engine, "/tmp/a", at=base)
+        second = await self.watch(engine, "/tmp/b", at=base + timedelta(seconds=6))
+        third = await self.watch(engine, "/tmp/c", at=base + timedelta(seconds=12))
+
+        self.assertTrue(first.success, first.error)
+        self.assertTrue(second.success, second.error)
+        self.assertFalse(third.success)
+        self.assertIn("At most 2 traps", third.error or "")
+        self.assertEqual(
+            [trap.target for trap in engine.state.active_traps], ["/tmp/a", "/tmp/b"]
         )
 
     async def test_a_successful_arming_is_counted(self) -> None:
@@ -449,15 +641,68 @@ class TrapStatsTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(engine.state.warden.traps_armed, 1)
 
+    async def test_two_traps_may_be_active_at_once(self) -> None:
+        engine = self.make_engine()
+        await engine.start()
+
+        first = await self.arm(engine, "worker")
+        second = await self.arm(engine, "backup")
+
+        self.assertTrue(first.success)
+        self.assertTrue(second.success)
+        self.assertEqual(engine.state.warden.traps_armed, 2)
+        self.assertEqual(
+            [trap.target for trap in engine.state.active_traps], ["worker", "backup"]
+        )
+
     async def test_a_rejected_arming_is_not_counted(self) -> None:
-        """One trap at a time: the second call arms nothing, so it is not a trap."""
+        """Two traps at a time: the third call arms nothing, so it is not a trap."""
         engine = self.make_engine()
         await engine.start()
         await self.arm(engine, "worker")
+        await self.arm(engine, "backup")
 
-        await self.arm(engine, "other")
+        rejected = await self.arm(engine, "third")
 
-        self.assertEqual(engine.state.warden.traps_armed, 1)
+        self.assertFalse(rejected.success)
+        self.assertIn("At most 2 traps", rejected.error or "")
+        self.assertEqual(engine.state.warden.traps_armed, 2)
+        self.assertEqual(len(engine.state.active_traps), 2)
+
+    async def test_a_firing_frees_only_its_own_slot(self) -> None:
+        """With two armed, the event resolves the trap it matched, not both."""
+        engine = self.make_engine()
+        await engine.start()
+        await self.watch(engine, "/tmp/a")
+        await self.watch(engine, "/tmp/b")
+
+        fired = await engine.handle_sandbox_event(
+            SandboxEvent(type=SandboxEventType.FILE_MODIFIED, path="/tmp/a")
+        )
+
+        self.assertTrue(fired)
+        self.assertEqual(
+            [trap.target for trap in engine.state.active_traps], ["/tmp/b"]
+        )
+
+    async def test_a_freed_slot_can_be_reused(self) -> None:
+        engine = self.make_engine()
+        await engine.start()
+        await self.watch(engine, "/tmp/a")
+        await self.watch(engine, "/tmp/b")
+        await engine.handle_sandbox_event(
+            SandboxEvent(type=SandboxEventType.FILE_MODIFIED, path="/tmp/a")
+        )
+
+        # A different trap tool, so the just-fired name being blocked does not
+        # mask whether the slot itself was released.
+        rearmed = await self.arm(engine, "worker")
+
+        self.assertTrue(rearmed.success, rearmed.error)
+        self.assertEqual(
+            [trap.target for trap in engine.state.active_traps],
+            ["/tmp/b", "worker"],
+        )
 
     async def test_a_firing_counts_for_both_sides(self) -> None:
         engine = self.make_engine()

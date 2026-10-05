@@ -169,7 +169,7 @@ before either agent runs. It runs as root, so it is the **only** correct place
 to change what either side may do — never do it by inspecting an agent's command
 text.
 
-It ends with two lines that exist for one reason each:
+Setup settles three things, each for one reason:
 
 - `passwd -l root` — the images ship root with an **empty** password field, and
   PAM's `nullok` lets `su root` accept it. Without this line *both* agents can
@@ -182,6 +182,24 @@ It ends with two lines that exist for one reason each:
   to authenticate with, so every `sudo` fails with "a password is required".
   `visudo -cf` validates the rule as part of setup, so a malformed file fails
   the match instead of silently breaking `sudo` for its duration.
+- `chmod 700` on each agent's home, **appended last** so nothing after it can
+  loosen one back up. `useradd -m` leaves the homes world-readable, which would
+  let the Prisoner read the Warden's scratchpad — its plan — and the Warden the
+  Prisoner's. The lockdown also follows the challenge's own `setup_script`,
+  which runs before it.
+
+Home isolation is one-directional in the strong sense, and this is the part to
+be honest about. Mode 700 stops the Prisoner completely: it has no root, so no
+route — `bash`, `read_file`, `write_file` — reaches the Warden's home. Against
+the Warden it stops every *ordinary* route only. The Warden holds `NOPASSWD:ALL`
+root and **root ignores file modes**, so a Warden that deliberately runs `sudo
+cat /home/prisoner/scratchpad.txt` still reads it, and no file mode can change
+that. Closing it would mean revoking the Warden's root, which the seeded
+challenges need (the Warden's hint for *The Hidden Artifact* is that it can
+disrupt the root-owned shards). So the Warden's instructions forbid it instead,
+and `peek_prisoner_logs` is its one sanctioned window into the Prisoner's side.
+`tests/test_privilege_boundaries.py` asserts both the wall and this residual, so
+neither is assumed away.
 
 Do not add command filtering to compensate. A regex over a shell command is not
 a boundary: `s'u'do -n whoami` executes `sudo` and matches no `sudo` pattern,
@@ -199,8 +217,11 @@ These rules cannot be checked offline — a mocked sandbox would agree with
 whatever the test believed. `tests/test_privilege_boundaries.py` drives both
 sides through the real `execute_tool_call()` path against a real sandbox, trying
 ten different spellings of `sudo` and three of `su`, and asserting the Warden
-reaches root by every one of them while the Prisoner reaches it by none. It is
-opt-in (`ARBITER_LIVE_SANDBOX=1`); run it after touching setup or privileges.
+reaches root by every one of them while the Prisoner reaches it by none. It also
+covers the home lockdown: each side can still use its own home, neither can
+list, read or write the other's through `bash` or `read_file`, and the Warden's
+deliberate `sudo` read still succeeds (the residual above). It is opt-in
+(`ARBITER_LIVE_SANDBOX=1`); run it after touching setup or privileges.
 
 ## Agent concurrency
 
@@ -320,7 +341,34 @@ The sandbox layer observes actual events.
 
 The Engine decides whether an event matches an armed trap and manages the Warden reaction window.
 
+`MAX_ACTIVE_TRAPS` (2) bounds how many traps the Warden may have armed and
+unresolved at one time. Two covers a likely path and a backup without letting
+the Warden blanket the sandbox; a slot is released when its trap fires, and the
+Warden's instructions say to spend the two armings carefully.
+
+State is a **list**, not a single slot, so a firing must resolve *the trap the
+event matched* (`matching_trap()` then `trigger(state, trap)`) and leave the
+others armed. Treating any event as "the trap fired" would silently disarm the
+Warden's second trap -- and with it the coverage it was armed for.
+
 Do not put trap semantics into sandbox monitoring or the Warden agent.
+
+## Prisoner bash output cap
+
+`PRISONER_BASH_OUTPUT_CHARS` (4000) bounds what one Prisoner `bash` call
+returns, applied in `execute_tool_call()` alongside the credit and cooldown
+rules -- not in the tool and not in `SandboxManager`.
+
+Only the **head** is kept, so aiming a command at something larger reveals no
+more than a small one. The result carries a truncation marker and a `notice`
+saying how much was dropped, so the Prisoner never reasons from output it does
+not know is incomplete.
+
+The Warden is deliberately exempt: its shell output is its own diagnostics for
+the defence it is running, and this is a Prisoner-side balance rule, not a
+shared transfer limit. The constant lives in the tool layer
+(`agents/tools/shell.py`) only because the model-facing description quotes the
+number; the Engine is what enforces it.
 
 ## Scratchpad
 

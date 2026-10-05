@@ -62,7 +62,10 @@ class MatchState(BaseModel):
     status: MatchStatus = MatchStatus.CREATED
     prisoner: AgentState = Field(default_factory=AgentState)
     warden: AgentState = Field(default_factory=AgentState)
-    active_trap: ActiveTrap | None = None
+    #: Traps the Warden has armed and that have not fired yet. Bounded by
+    #: ``MAX_ACTIVE_TRAPS`` in the trap manager; a list rather than one slot so
+    #: the Warden can cover two things at once without losing either.
+    active_traps: list[ActiveTrap] = Field(default_factory=list)
     # Immediately after a trigger, this trap cannot be armed as the Warden's
     # next action. It is cleared after any other successful Warden action.
     blocked_trap_name: str | None = None

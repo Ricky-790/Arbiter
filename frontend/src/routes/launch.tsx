@@ -1,4 +1,5 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMemo } from "react";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { ArrowLeft, ArrowUpRight } from "lucide-react";
 import { toast } from "sonner";
@@ -13,6 +14,7 @@ import {
 } from "@/lib/api";
 import type { AvailableModelsResponse, StrategySchema } from "@/lib/dto";
 import {
+  type SeatDefault,
   seatModelKey,
   seatStrategyPayloads,
   useAgentSeats,
@@ -21,9 +23,36 @@ import {
 export const Route = createFileRoute("/launch")({
   validateSearch: (
     search: Record<string, unknown>,
-  ): { challengeId?: string } => {
-    const challengeId = search["challengeId"];
-    return typeof challengeId === "string" ? { challengeId } : {};
+  ): {
+    challengeId?: string;
+    prisoner_provider?: string;
+    prisoner_model?: string;
+    warden_provider?: string;
+    warden_model?: string;
+    prisoner_strategy?: string;
+    warden_strategy?: string;
+  } => {
+    // Optional beyond the challenge, so `/launch?challengeId=…` still works
+    // from a challenge brief. The rest arrive together from a review's
+    // "Try a match", which carries the models that match ran and the strategy
+    // the reviewer proposed.
+    const read = (key: string): string | undefined => {
+      const value = search[key];
+      return typeof value === "string" && value !== "" ? value : undefined;
+    };
+    return Object.fromEntries(
+      [
+        "challengeId",
+        "prisoner_provider",
+        "prisoner_model",
+        "warden_provider",
+        "warden_model",
+        "prisoner_strategy",
+        "warden_strategy",
+      ]
+        .map((key) => [key, read(key)])
+        .filter((pair): pair is [string, string] => pair[1] !== undefined),
+    );
   },
   head: () => ({
     meta: [
@@ -45,7 +74,15 @@ export const Route = createFileRoute("/launch")({
 
 function LaunchPage() {
   const navigate = useNavigate();
-  const { challengeId = "" } = Route.useSearch();
+  const {
+    challengeId = "",
+    prisoner_provider: prisonerProvider,
+    prisoner_model: prisonerModel,
+    warden_provider: wardenProvider,
+    warden_model: wardenModel,
+    prisoner_strategy: prisonerStrategy,
+    warden_strategy: wardenStrategy,
+  } = Route.useSearch();
 
   const modelsQuery = useQuery({
     queryKey: ["models"],
@@ -75,6 +112,32 @@ function LaunchPage() {
   const savedCount =
     sideStrategies.prisoner.length + sideStrategies.warden.length;
 
+  // A review's "Try a match" hands over both models and, for one side, the
+  // strategy it proposed. The API keys are deliberately not carried across:
+  // they are per-provider secrets the operator has to paste themselves.
+  const seatDefaults = useMemo(
+    () => ({
+      prisoner: seatFromSearch({
+        provider: prisonerProvider,
+        model: prisonerModel,
+        suggestions: prisonerStrategy,
+      }),
+      warden: seatFromSearch({
+        provider: wardenProvider,
+        model: wardenModel,
+        suggestions: wardenStrategy,
+      }),
+    }),
+    [
+      prisonerProvider,
+      prisonerModel,
+      prisonerStrategy,
+      wardenProvider,
+      wardenModel,
+      wardenStrategy,
+    ],
+  );
+
   const {
     seats,
     ready,
@@ -83,7 +146,7 @@ function LaunchPage() {
     setApiKey,
     chooseStrategy,
     setSuggestions,
-  } = useAgentSeats(models);
+  } = useAgentSeats(models, seatDefaults);
 
   const launch = useMutation({
     mutationFn: () =>
@@ -308,6 +371,26 @@ function LaunchPage() {
       </div>
     </main>
   );
+}
+
+/**
+ * Turn one side's optional handoff into a seat default, or null when the
+ * review did not name a model for it — in which case the picker starts empty
+ * rather than half-filled.
+ */
+function seatFromSearch({
+  provider,
+  model,
+  suggestions,
+}: {
+  provider: string | undefined;
+  model: string | undefined;
+  suggestions: string | undefined;
+}): SeatDefault | null {
+  if (provider === undefined || model === undefined) return null;
+  return suggestions === undefined
+    ? { provider, model }
+    : { provider, model, suggestions };
 }
 
 /**

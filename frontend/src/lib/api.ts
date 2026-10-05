@@ -9,6 +9,7 @@ import type {
   AvailableModelsResponse,
   ChallengeSchema,
   ChallengeSummary,
+  ConversationEntry,
   ForkDetailSchema,
   ForkListResponse,
   ForkMatchRequest,
@@ -17,10 +18,14 @@ import type {
   MatchEventSchema,
   MatchListResponse,
   MatchListSchema,
+  MatchSide,
   MatchSummaryResponse,
   ModelCheckRequest,
   ModelCheckResponse,
   PageMeta,
+  ReviewEvent,
+  ReviewMatchEvent,
+  ReviewStrategyRequest,
   SaveStrategyRequest,
   SortOrder,
   SpectateEvent,
@@ -29,6 +34,9 @@ import type {
   StartMatchResponse,
   StrategyDetailResponse,
   StrategySchema,
+  ThoughtRecord,
+  ToolCallRecord,
+  TrapEvent,
 } from "./dto";
 
 const configuredBaseUrl =
@@ -253,6 +261,131 @@ export type PageParams = {
   limit?: number;
 };
 
+/** How many rows a walk-all helper pulls per request. */
+const REVIEW_PAGE_SIZE = 100;
+
+/** `GET /api/v1/reviewer/conversation` — one page of an agent's conversation. */
+export function listConversation(
+  matchId: string,
+  user: MatchSide,
+  params: PageParams = {},
+): Promise<PageMeta<ConversationEntry>> {
+  return request<PageMeta<ConversationEntry>>(
+    `/api/v1/reviewer/conversation?${reviewQuery(matchId, user, params)}`,
+  );
+}
+
+/** `GET /api/v1/reviewer/tool-calls` — one page of an agent's tool calls. */
+export function listToolCalls(
+  matchId: string,
+  user: MatchSide,
+  params: PageParams = {},
+): Promise<PageMeta<ToolCallRecord>> {
+  return request<PageMeta<ToolCallRecord>>(
+    `/api/v1/reviewer/tool-calls?${reviewQuery(matchId, user, params)}`,
+  );
+}
+
+/** `GET /api/v1/reviewer/thoughts` — one page of an agent's narration. */
+export function listThoughts(
+  matchId: string,
+  user: MatchSide,
+  params: PageParams = {},
+): Promise<PageMeta<ThoughtRecord>> {
+  return request<PageMeta<ThoughtRecord>>(
+    `/api/v1/reviewer/thoughts?${reviewQuery(matchId, user, params)}`,
+  );
+}
+
+/** `GET /api/v1/reviewer/traps` — one page of trap firings, match-wide. */
+export function listTraps(
+  matchId: string,
+  params: PageParams = {},
+): Promise<PageMeta<TrapEvent>> {
+  const query = new URLSearchParams({
+    match_id: matchId,
+    offset: String(params.offset ?? 0),
+    limit: String(params.limit ?? REVIEW_PAGE_SIZE),
+  });
+  return request<PageMeta<TrapEvent>>(`/api/v1/reviewer/traps?${query}`);
+}
+
+/** `GET /api/v1/reviewer/events` — one page of an agent's raw events. */
+export function listReviewEvents(
+  matchId: string,
+  user: MatchSide,
+  params: PageParams = {},
+): Promise<PageMeta<ReviewMatchEvent>> {
+  return request<PageMeta<ReviewMatchEvent>>(
+    `/api/v1/reviewer/events?${reviewQuery(matchId, user, params)}`,
+  );
+}
+
+function reviewQuery(
+  matchId: string,
+  user: MatchSide,
+  params: PageParams,
+): string {
+  return new URLSearchParams({
+    match_id: matchId,
+    user,
+    offset: String(params.offset ?? 0),
+    limit: String(params.limit ?? REVIEW_PAGE_SIZE),
+  }).toString();
+}
+
+/**
+ * Every row of a reviewer listing.
+ *
+ * The endpoints are paged at the reviewer's own ceiling; the review page reads a
+ * whole match at once, so this walks the pages until it has them all. An empty
+ * answer is legitimate — a match recorded before conversations were kept has
+ * none — so a short page simply ends the walk.
+ */
+async function listAllReview<T>(
+  fetchPage: (offset: number) => Promise<PageMeta<T>>,
+): Promise<T[]> {
+  const rows: T[] = [];
+  for (let offset = 0; offset <= 10_000; offset += REVIEW_PAGE_SIZE) {
+    const page = await fetchPage(offset);
+    rows.push(...page.items);
+    if (!page.has_more || page.items.length === 0) break;
+  }
+  return rows;
+}
+
+export function listAllConversation(
+  matchId: string,
+  user: MatchSide,
+): Promise<ConversationEntry[]> {
+  return listAllReview((offset) => listConversation(matchId, user, { offset }));
+}
+
+export function listAllToolCalls(
+  matchId: string,
+  user: MatchSide,
+): Promise<ToolCallRecord[]> {
+  return listAllReview((offset) => listToolCalls(matchId, user, { offset }));
+}
+
+export function listAllThoughts(
+  matchId: string,
+  user: MatchSide,
+): Promise<ThoughtRecord[]> {
+  return listAllReview((offset) => listThoughts(matchId, user, { offset }));
+}
+
+export function listAllTraps(matchId: string): Promise<TrapEvent[]> {
+  return listAllReview((offset) => listTraps(matchId, { offset }));
+}
+
+export function listAllReviewEvents(
+  matchId: string,
+  user: MatchSide,
+): Promise<ReviewMatchEvent[]> {
+  return listAllReview((offset) => listReviewEvents(matchId, user, { offset }));
+}
+
 /** Query options shared by the paginated list endpoints. */
 export type ListPageParams = {
   page?: number;
@@ -339,12 +472,12 @@ export function spectateUrl(matchId: string): string {
 }
 
 /**
- * Consume the spectate endpoint's Server-Sent Events.
+ * Consume a Server-Sent Events response body.
  *
- * The endpoint is `POST`, so the browser `EventSource` API cannot be used;
- * this reads the response body as a stream and parses SSE frames. Resolves
- * when the backend closes the stream, rejects on transport failure, and stops
- * when `signal` is aborted.
+ * Both streaming endpoints are `POST`, so the browser `EventSource` cannot be
+ * used; this reads the body as a stream and parses SSE frames. Resolves when the
+ * backend closes the stream, rejects on transport failure, and stops when
+ * `signal` is aborted.
  */
 export async function streamMatchEvents(
   matchId: string,
@@ -356,11 +489,50 @@ export async function streamMatchEvents(
     headers: { Accept: "text/event-stream" },
     signal,
   });
+  await consumeEventStream(response, onEvent);
+}
+
+/**
+ * `POST /api/v1/strategies/review` — run the strategy reviewer over one match
+ * and stream what it does and what it concludes.
+ *
+ * Everything is validated before the stream opens — unknown provider, a missing
+ * key, a model the provider does not serve, an unknown strategy or match, or a
+ * strategy played on a different challenge — so those arrive as a plain 4xx
+ * rather than an error frame halfway through. Once the stream is open, progress
+ * arrives as `review_tool_call`/`review_tool_result` frames and the run ends with
+ * exactly one `review_finished` (carrying the proposed strategy) or
+ * `review_error`.
+ *
+ * Nothing is saved: what comes back is a proposal.
+ */
+export async function reviewStrategy(
+  payload: ReviewStrategyRequest,
+  onEvent: (event: ReviewEvent) => void,
+  signal: AbortSignal,
+): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/strategies/review`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+    },
+    body: JSON.stringify(payload),
+    signal,
+  });
+  await consumeEventStream(response, onEvent);
+}
+
+/** Read one SSE response to its end, handing each frame to `onEvent`. */
+async function consumeEventStream<T>(
+  response: Response,
+  onEvent: (event: T) => void,
+): Promise<void> {
   if (!response.ok) {
     throw new ApiError(await errorDetail(response), response.status);
   }
   if (response.body === null) {
-    throw new ApiError("Spectator stream has no body", response.status);
+    throw new ApiError("Stream has no body", response.status);
   }
 
   const reader = response.body.getReader();
@@ -374,18 +546,14 @@ export async function streamMatchEvents(
 
     let boundary = buffer.indexOf("\n\n");
     while (boundary !== -1) {
-      const frame = buffer.slice(0, boundary);
+      emitFrame(buffer.slice(0, boundary), onEvent);
       buffer = buffer.slice(boundary + 2);
-      emitFrame(frame, onEvent);
       boundary = buffer.indexOf("\n\n");
     }
   }
 }
 
-function emitFrame(
-  frame: string,
-  onEvent: (event: SpectateEvent) => void,
-): void {
+function emitFrame<T>(frame: string, onEvent: (event: T) => void): void {
   const data = frame
     .split("\n")
     .filter((line) => line.startsWith("data:"))
@@ -393,8 +561,8 @@ function emitFrame(
     .join("\n");
   if (data.length === 0) return; // Comment/keep-alive frame.
   try {
-    onEvent(JSON.parse(data) as SpectateEvent);
+    onEvent(JSON.parse(data) as T);
   } catch {
-    // A malformed frame must not kill the spectator stream.
+    // A malformed frame must not kill the stream.
   }
 }

@@ -15,6 +15,7 @@ import { Route as ChallengesRouteImport } from './routes/challenges'
 import { Route as LaunchRouteImport } from './routes/launch'
 import { Route as LeaderboardRouteImport } from './routes/leaderboard'
 import { Route as MatchesRouteImport } from './routes/matches'
+import { Route as ReviewRouteImport } from './routes/review'
 import { Route as StrategyRouteImport } from './routes/strategy'
 import { Route as MatchesIndexRouteImport } from './routes/matches.index'
 import { Route as MatchesMatchIdRouteImport } from './routes/matches.$matchId'
@@ -49,6 +50,11 @@ const MatchesRoute = MatchesRouteImport.update({
   path: '/matches',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ReviewRoute = ReviewRouteImport.update({
+  id: '/review',
+  path: '/review',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const StrategyRoute = StrategyRouteImport.update({
   id: '/strategy',
   path: '/strategy',
@@ -72,6 +78,7 @@ export interface FileRoutesByFullPath {
   '/launch': typeof LaunchRoute
   '/leaderboard': typeof LeaderboardRoute
   '/matches': typeof MatchesRouteWithChildren
+  '/review': typeof ReviewRoute
   '/strategy': typeof StrategyRoute
   '/matches/$matchId': typeof MatchesMatchIdRoute
   '/matches/': typeof MatchesIndexRoute
@@ -82,6 +89,7 @@ export interface FileRoutesByTo {
   '/challenges': typeof ChallengesRoute
   '/launch': typeof LaunchRoute
   '/leaderboard': typeof LeaderboardRoute
+  '/review': typeof ReviewRoute
   '/strategy': typeof StrategyRoute
   '/matches/$matchId': typeof MatchesMatchIdRoute
   '/matches': typeof MatchesIndexRoute
@@ -94,6 +102,7 @@ export interface FileRoutesById {
   '/launch': typeof LaunchRoute
   '/leaderboard': typeof LeaderboardRoute
   '/matches': typeof MatchesRouteWithChildren
+  '/review': typeof ReviewRoute
   '/strategy': typeof StrategyRoute
   '/matches/$matchId': typeof MatchesMatchIdRoute
   '/matches/': typeof MatchesIndexRoute
@@ -107,6 +116,7 @@ export interface FileRouteTypes {
     | '/launch'
     | '/leaderboard'
     | '/matches'
+    | '/review'
     | '/strategy'
     | '/matches/$matchId'
     | '/matches/'
@@ -117,6 +127,7 @@ export interface FileRouteTypes {
     | '/challenges'
     | '/launch'
     | '/leaderboard'
+    | '/review'
     | '/strategy'
     | '/matches/$matchId'
     | '/matches'
@@ -128,6 +139,7 @@ export interface FileRouteTypes {
     | '/launch'
     | '/leaderboard'
     | '/matches'
+    | '/review'
     | '/strategy'
     | '/matches/$matchId'
     | '/matches/'
@@ -140,6 +152,7 @@ export interface RootRouteChildren {
   LaunchRoute: typeof LaunchRoute
   LeaderboardRoute: typeof LeaderboardRoute
   MatchesRoute: typeof MatchesRouteWithChildren
+  ReviewRoute: typeof ReviewRoute
   StrategyRoute: typeof StrategyRoute
 }
 
@@ -187,6 +200,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof MatchesRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/review': {
+      id: '/review'
+      path: '/review'
+      fullPath: '/review'
+      preLoaderRoute: typeof ReviewRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/strategy': {
       id: '/strategy'
       path: '/strategy'
@@ -231,6 +251,7 @@ const rootRouteChildren: RootRouteChildren = {
   LaunchRoute: LaunchRoute,
   LeaderboardRoute: LeaderboardRoute,
   MatchesRoute: MatchesRouteWithChildren,
+  ReviewRoute: ReviewRoute,
   StrategyRoute: StrategyRoute,
 }
 export const routeTree = rootRouteImport

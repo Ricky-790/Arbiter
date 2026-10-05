@@ -22,4 +22,6 @@ AGENTS.md
 
 # Docker files themselves.
 Dockerfile
+Dockerfile.worker
+Dockerfile.fork-worker
 .dockerignore

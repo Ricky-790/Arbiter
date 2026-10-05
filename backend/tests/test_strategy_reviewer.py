@@ -6,6 +6,7 @@ pinned here is what the reviewer is allowed to ask, that the match id is bound
 rather than model-supplied, and what the endpoint streams.
 """
 
+import asyncio
 import json
 import unittest
 from datetime import UTC, datetime
@@ -343,6 +344,46 @@ class ReviewStreamTests(unittest.IsolatedAsyncioTestCase):
         async for chunk in response.body_iterator:
             frames.append(json.loads(chunk.removeprefix("data: ").strip()))
         return frames
+
+    async def test_the_stream_stays_alive_while_a_retry_is_waited_out(self) -> None:
+        """A provider retry is 45s of silence, so the stream must not go quiet.
+
+        A connection dropped for idling cancels the review, which would turn a
+        recoverable 429 into a lost run. The gap is filled with SSE comments,
+        which carry no ``data:`` line and so are not frames.
+        """
+
+        class SlowReviewer:
+            def __init__(self, **kwargs):
+                pass
+
+            async def run_turn(self):
+                await asyncio.sleep(0.05)
+                return "Eventually better."
+
+        with (
+            patch.object(routes, "check_model_exists", AsyncMock()),
+            patch.object(
+                strategies_service, "get_strategy_row", AsyncMock(return_value=self.strategy())
+            ),
+            patch.object(matches_service, "get_match", AsyncMock(return_value=self.match())),
+            patch.object(routes, "StrategyReviewerAgent", SlowReviewer),
+            patch.object(routes, "REVIEW_KEEP_ALIVE_SECONDS", 0.005),
+        ):
+            response = await routes.review_strategy(
+                self.payload(), session=self.fake_session()
+            )
+            chunks = [chunk async for chunk in response.body_iterator]
+
+        self.assertIn(": keep-alive\n\n", chunks)
+        frames = [
+            json.loads(chunk.removeprefix("data: ").strip())
+            for chunk in chunks
+            if chunk.startswith("data: ")
+        ]
+        self.assertEqual(frames[0]["type"], "review_started")
+        self.assertEqual(frames[-1]["type"], "review_finished")
+        self.assertEqual(frames[-1]["output"], "Eventually better.")
 
     async def test_the_stream_reports_progress_then_the_strategy(self) -> None:
         created: dict = {}

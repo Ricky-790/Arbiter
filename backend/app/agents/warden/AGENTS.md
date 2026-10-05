@@ -57,6 +57,12 @@ Sandbox events are observed by the sandbox layer and interpreted by the Engine.
 
 Do not move trap state into the LLM agent.
 
+At most `MAX_ACTIVE_TRAPS` (2) traps may be armed and unresolved at once;
+`TrapManager.validate_arm` rejects the third and says why, and a firing frees
+its own slot. The Warden's instructions tell it to spend the two armings
+carefully, so a rejected arming is a recoverable result it can see and respond
+to — not something to soften into "always allow".
+
 ## Scratchpad
 
 Scratchpad use is voluntary.
@@ -81,6 +87,14 @@ Its information comes from:
 - sandbox events exposed to it
 - the Prisoner activity log (tool calls only, never results or private calls)
 - intentionally public match information
+
+The Prisoner's home directory `/home/prisoner` is out of bounds, even though the
+Warden's `NOPASSWD:ALL` root technically outranks its `0700` mode. That is why
+the rule lives in the Warden's instructions rather than in a path check:
+`peek_prisoner_logs` is the one sanctioned window into the Prisoner's side, and
+trading on the Warden's root to read the Prisoner's files defeats the point of
+the role. Do not add a tool-level path denylist to enforce it — it would fail
+open exactly like the command denylist the Engine docs reject.
 
 ## Security
 

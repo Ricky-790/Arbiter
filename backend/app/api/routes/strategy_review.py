@@ -65,6 +65,13 @@ from app.reviewer.service import DEFAULT_LIMIT, MAX_LIMIT
 
 logger = get_logger()
 
+#: How long the review stream may go quiet before it sends an SSE comment.
+#:
+#: Shorter than a provider retry (45s), so a review waiting one out keeps
+#: sending something and a proxy does not close the connection -- closing it
+#: cancels the review, which would turn a recoverable 429 into a lost run.
+REVIEW_KEEP_ALIVE_SECONDS = 15.0
+
 strategies_router = APIRouter(prefix="/api/v1/strategies", tags=["strategies"])
 reviewer_router = APIRouter(prefix="/api/v1/reviewer", tags=["reviewer"])
 
@@ -509,7 +516,18 @@ async def _review_stream(
     )
     try:
         while True:
-            event = await queue.get()
+            try:
+                event = await asyncio.wait_for(
+                    queue.get(), timeout=REVIEW_KEEP_ALIVE_SECONDS
+                )
+            except TimeoutError:
+                # The review is between events -- most often asleep on a
+                # provider retry, which is 45s. Going quiet that long lets a
+                # proxy or browser drop the connection, and a dropped stream
+                # cancels the review, so hold it open with a comment frame.
+                # The comment carries no ``data:``, so the client skips it.
+                yield sse.keep_alive()
+                continue
             if event is None:
                 break
             yield sse.frame(event)

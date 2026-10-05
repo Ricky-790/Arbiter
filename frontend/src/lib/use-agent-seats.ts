@@ -49,10 +49,18 @@ type SeatState = Pick<
 
 export type SeatSide = "prisoner" | "warden";
 
-/** A provider/model pair offered as the picker's starting point. */
+/**
+ * What a seat should start out holding, from a fork's parent match or from
+ * "try this strategy in a match".
+ */
 export type SeatDefault = {
   provider: string;
   model: string;
+  /**
+   * Free text to start the strategy box with, when the caller is carrying one —
+   * a proposed strategy, rather than a saved id.
+   */
+  suggestions?: string;
 };
 
 /** A pair from the parent of a fork, used to pre-fill the pickers. */
@@ -197,22 +205,39 @@ export function useAgentSeats(
   const [prisoner, setPrisoner] = useState<SeatState>(emptySeat);
   const [warden, setWarden] = useState<SeatState>(emptySeat);
 
-  const prefilled = useRef<Record<SeatSide, boolean>>({
-    prisoner: false,
-    warden: false,
-  });
+  // Tracked separately: the text can be filled the moment the defaults arrive,
+  // while the model pair may only be filled once the catalogue confirms it is
+  // still offered.
+  const prefilled = useRef<Record<SeatSide, { text: boolean; model: boolean }>>(
+    {
+      prisoner: { text: false, model: false },
+      warden: { text: false, model: false },
+    },
+  );
 
   useEffect(() => {
-    if (defaults === undefined || models.providers.length === 0) return;
+    if (defaults === undefined) return;
     for (const side of ["prisoner", "warden"] as const) {
-      if (prefilled.current[side]) continue;
       const wanted = defaults[side];
-      if (wanted === null || wanted === undefined) continue;
+      if (wanted === undefined || wanted === null) continue;
+      const done = prefilled.current[side];
+      const setter = side === "prisoner" ? setPrisoner : setWarden;
+
+      if (!done.text && wanted.suggestions !== undefined) {
+        done.text = true;
+        const text = wanted.suggestions;
+        setter((current) =>
+          current.suggestions === ""
+            ? { ...current, suggestions: text }
+            : current,
+        );
+      }
+
+      if (done.model || models.providers.length === 0) continue;
       if (!modelsForProvider(models, wanted.provider).includes(wanted.model)) {
         continue;
       }
-      prefilled.current[side] = true;
-      const setter = side === "prisoner" ? setPrisoner : setWarden;
+      done.model = true;
       setter((current) =>
         current.provider === "" && current.model === ""
           ? { ...current, provider: wanted.provider, model: wanted.model }

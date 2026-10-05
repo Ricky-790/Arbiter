@@ -39,6 +39,46 @@ uv run celery -A app.workers.celery_app worker \
     --queues=arbiter.matches --concurrency=1 --loglevel=INFO
 ```
 
+Fork worker — a second pool on its own queue, only if you are building forks.
+It never starts a match, and a deployment that does not use forks does not need
+it running:
+
+```bash
+uv run celery -A app.workers.celery_app worker \
+    --queues=arbiter.forks --concurrency=1 --loglevel=INFO
+```
+
+Celery does **not** auto-reload. Unlike the API (`--reload`), these processes
+keep the code they started with, so every change under `app/engine/`,
+`app/agents/` or `app/sandbox/` -- match rules, setup commands, prompts, tool
+descriptions -- needs a worker restart before the next match. A match run
+against a stale worker silently enforces the old rules: the giveaway is a tool
+result quoting an error string that no longer exists in the source. Restart
+*both* pools after such a change, or a fork will be rebuilt under the old rules.
+
+## Deploy
+
+Three images, one per process. Each is self-contained — none derives from
+another — so a platform can build whichever service it needs:
+
+| Dockerfile | Process | Queue |
+| --- | --- | --- |
+| `Dockerfile` | API (`alembic upgrade head`, then uvicorn) | — |
+| `Dockerfile.worker` | Match worker | `arbiter.matches` |
+| `Dockerfile.fork-worker` | Fork worker | `arbiter.forks` |
+
+`Dockerfile.worker` and `Dockerfile.fork-worker` differ only in the default
+`CELERY_QUEUES`. If your platform can set a service's environment, deploy the
+fork worker from `Dockerfile.worker` with `CELERY_QUEUES=arbiter.forks` and skip
+the third file.
+
+The fork worker deliberately does not need the model provider keys or
+`ARBITER_BYOK_SECRET`: replaying recorded tool calls builds no agents, so it has
+no reason to hold a credential it never uses.
+
+Only the API runs migrations. Both workers assume the schema is current, so
+start the API first on a fresh deployment.
+
 ## Start and spectate a match
 
 `POST /api/v1/matches/start-match` queues the match and returns a `match_id`

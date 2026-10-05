@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { ArrowLeft, ArrowUpRight } from "lucide-react";
+import { ArrowLeft, ArrowUpRight, ScanSearch } from "lucide-react";
 
 import { Eyebrow } from "@/components/arbiter/app-shell";
 import { OutcomeBadge } from "@/components/arbiter/outcome-badge";
@@ -82,7 +82,7 @@ export function StrategyView({ strategyId }: { strategyId: string }) {
             The match it came from is no longer available.
           </p>
         ) : (
-          <LineageRow match={parent} role="origin" />
+          <LineageRow match={parent} role="origin" strategyId={strategy.id} />
         )}
       </section>
 
@@ -102,7 +102,12 @@ export function StrategyView({ strategyId }: { strategyId: string }) {
           </p>
         ) : (
           used.items.map((match) => (
-            <LineageRow key={match.match_id} match={match} role="use" />
+            <LineageRow
+              key={match.match_id}
+              match={match}
+              role="use"
+              strategyId={strategy.id}
+            />
           ))
         )}
       </section>
@@ -146,45 +151,60 @@ function Header({
 }
 
 /**
- * One match in a strategy's lineage, linking to that match's record.
+ * One match in a strategy's lineage: its record on the left, the review action
+ * on the right.
  *
  * The origin row is captioned, because the parent is not a use of the strategy:
- * it ran the wording before the entry existed.
+ * it ran the wording before the entry existed. Both rows can be reviewed — the
+ * question is the same either way, what would have played better here.
  */
 function LineageRow({
   match,
   role,
+  strategyId,
 }: {
   match: StrategyMatchSummary;
   role: "origin" | "use";
+  strategyId: string;
 }) {
   return (
-    <Link
-      to="/matches"
-      search={{ match_id: match.match_id }}
-      className={`lineage-row is-${role}`}
-    >
-      <span className="lineage-row-challenge">
-        {match.challenge_name ?? "Unknown challenge"}
-      </span>
-      <span className="lineage-row-models">
-        {formatModel("", match.prisoner_model)}{" "}
-        <span className="text-muted">vs</span>{" "}
-        {formatModel("", match.warden_model)}
-      </span>
-      <span className="lineage-row-outcome">
-        <OutcomeBadge
-          match={{ winner: match.winner, status: match.winner ?? "unknown" }}
-        />
-      </span>
-      <span className="lineage-row-caption">
-        {role === "origin" ? (
-          "Promoted from this match"
-        ) : (
-          <span className="lineage-row-id">{match.match_id}</span>
-        )}
-      </span>
-      <ArrowUpRight className="lineage-row-arrow size-4" />
-    </Link>
+    <div className={`lineage-row is-${role}`}>
+      <Link
+        to="/matches"
+        search={{ match_id: match.match_id }}
+        className="lineage-row-link"
+      >
+        <span className="lineage-row-challenge">
+          {match.challenge_name ?? "Unknown challenge"}
+        </span>
+        <span className="lineage-row-models">
+          {formatModel("", match.prisoner_model)}{" "}
+          <span className="text-muted">vs</span>{" "}
+          {formatModel("", match.warden_model)}
+        </span>
+        <span className="lineage-row-outcome">
+          <OutcomeBadge
+            match={{ winner: match.winner, status: match.winner ?? "unknown" }}
+          />
+        </span>
+        <span className="lineage-row-caption">
+          {role === "origin" ? (
+            "Promoted from this match"
+          ) : (
+            <span className="lineage-row-id">{match.match_id}</span>
+          )}
+        </span>
+        <ArrowUpRight className="lineage-row-arrow size-4" />
+      </Link>
+
+      <Link
+        to="/review"
+        search={{ strategy_id: strategyId, match_id: match.match_id }}
+        className="lineage-review"
+      >
+        <ScanSearch className="size-3.5" />
+        Review
+      </Link>
+    </div>
   );
 }

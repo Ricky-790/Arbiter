@@ -14,7 +14,7 @@ from .models import ToolCall, ToolCost, ToolResult
 from .network import BlockNetworkTool
 from .process import AutoKillTool, KillProcessTool, WatchProcessTool
 from .registry import ToolRegistry, build_default_registry
-from .shell import BashTool
+from .shell import PRISONER_BASH_OUTPUT_CHARS, BashTool
 from .system import PassTool, SubmitFlagTool
 
 __all__ = [
@@ -26,6 +26,7 @@ __all__ = [
     "ToolResult",
     "ToolCall",
     "PRISONER_LOG_PATH",
+    "PRISONER_BASH_OUTPUT_CHARS",
     "BashTool",
     "ReadFileTool",
     "WriteFileTool",

@@ -91,6 +91,13 @@ operations run as that user rather than through a privileged API.
 The scratchpad path is backend-controlled and actor-specific
 (`/home/<user>/scratchpad.txt`) and never derived from model input.
 
+Each agent's home is mode `0700`, set by the Engine's setup, not here. This
+layer only runs operations as the acting user, so the mode is what makes the
+two homes mutually unreachable — do not special-case home paths in
+`_validate_path`, which deliberately has no workspace scoping. Note the
+asymmetry that follows from the Warden holding root: the mode stops the
+Prisoner entirely, but root ignores it. See `app/engine/AGENTS.md`.
+
 The well-known Prisoner activity log at `/tmp/prisoner_logs` is written by the
 Engine as root and left world-readable, so the Warden can read it while the
 Prisoner cannot rewrite their own record.

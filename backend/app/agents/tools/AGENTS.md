@@ -105,6 +105,34 @@ This is intentional and must be preserved during refactoring.
 
 A tool's cost must never be enforced inside the tool implementation.
 
+## `bash` output cap
+
+`PRISONER_BASH_OUTPUT_CHARS` (4000) lives in `shell.py` next to the `bash`
+description, because the description quotes the number and the two must not
+drift. It is **not** enforcement: the Engine applies the cap in
+`execute_tool_call()`, exactly like credits and cooldowns.
+
+`read_file`, `write_file` and the scratchpad tools are deliberately uncapped.
+Only the Prisoner's `bash` is bounded, and only because nothing else bounds a
+single command — chaining five or six `cat`s into one charged action otherwise
+returns a whole filesystem in one go. The Warden's `bash` is exempt.
+
+## Home directory isolation
+
+Each agent's home is mode `0700`, set by the Engine's `_setup_commands()`. The
+tool layer never enforces this — `read_file`, `write_file` and `bash` all run
+as the acting user and the OS decides.
+
+So: the Prisoner cannot reach `/home/warden` by any route. The Warden reaches
+`/home/prisoner` by no *ordinary* route, but its `NOPASSWD:ALL` root outranks
+file modes, so a deliberate `sudo` still can; that residual is the Warden's
+instructions' problem, not the tools'. Do not add a path denylist here to close
+it — a regex over a path or a command fails open, the same way and for the same
+reasons as the `sudo` denylist rejected in `app/engine/AGENTS.md`.
+
+The tool descriptions say the other agent's home is off limits; keep them in
+step with the setup commands when either changes.
+
 ## File vs scratchpad
 
 Keep these capabilities distinct.

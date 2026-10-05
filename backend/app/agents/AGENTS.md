@@ -183,6 +183,16 @@ stopping the match. `Retry-After` is honoured for rate limits but clamped
 wall-clock budget. Only attempts that actually retry are reported as
 `agent_retry`; the last one reaches the match log as `agent_unavailable`.
 
+The Strategy Reviewer is the one agent that overrides this timing. A match
+agent's cooldown is spent against a match wall clock, which is exactly what a
+review does not have: its caller is watching a stream, so a provider hiccup is
+worth riding out rather than failing the run. `StrategyReviewerAgent` replaces
+`_retry_wait` with a flat `_review_retry_wait_seconds` (45s) for every retryable
+status, ignoring `Retry-After` — waiting longer than a provider asks is safe,
+and a short `Retry-After` would only retry back into the same limit and spend
+one of the three attempts. Do not move this into the base class: 45s is wrong
+for a match, whose remaining wall clock the wait comes out of.
+
 ## Prisoner and Warden
 
 `prisoner/` and `warden/` should remain thin role-specific wrappers.
@@ -218,6 +228,9 @@ machinery, history repair and provider retry handling. What differs:
 - **A request limit.** `_request_limit` bounds its model requests. A match agent
   is paced by the Engine's turn loop and the match clock; a one-shot agent has
   nothing else bounding it, so it must set this.
+- **Its own retry cooldown.** `_retry_wait` is overridden to a flat 45s for
+  429/503/504, rather than the base 30s-or-`Retry-After`. See "Provider errors"
+  above for why the timing differs.
 
 It is read-only in the strong sense: no Engine, no sandbox, no `SandboxManager`,
 and nothing it reads can be changed. Its output is a proposal, returned and

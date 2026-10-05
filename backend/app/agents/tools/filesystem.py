@@ -21,7 +21,8 @@ class ReadFileTool(BaseTool):
             description=(
                 "Read the contents of a file. The path is used as given: an absolute path "
                 "reads that exact file, a relative path resolves against your working directory. "
-                "Runs with your own user permissions, so files you are not allowed to read will fail."
+                "Runs with your own user permissions, so files you are not allowed to read will fail. "
+                "The other agent's home directory is off limits."
             ),
             allowed_agents=frozenset({AgentType.PRISONER, AgentType.WARDEN}),
             cost=ToolCost.READ_FILE,
@@ -41,7 +42,8 @@ class WriteFileTool(BaseTool):
                 "Write content to a file at the given path (including extension). The path is "
                 "used as given: an absolute path writes that exact file, a relative path resolves "
                 "against your working directory. Parent directories are created as needed. Runs "
-                "with your own user permissions, so locations you may not write will fail."
+                "with your own user permissions, so locations you may not write will fail. "
+                "The other agent's home directory is off limits."
             ),
             allowed_agents=frozenset({AgentType.PRISONER, AgentType.WARDEN}),
             cost=ToolCost.WRITE_FILE,

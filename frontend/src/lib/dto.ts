@@ -353,6 +353,123 @@ export type PageMeta<T> = {
   has_more: boolean;
 };
 
+/**
+ * `ConversationEntry` — one step of an agent's stored conversation.
+ *
+ * The stored form is pydantic-ai's own message dump; this is the same content
+ * resolved into one row per step, so it can be paged without parsing the wire
+ * format. `kind` is `user-prompt`, `tool-call`, `tool-return` or `text`.
+ */
+export type ConversationEntry = {
+  index: number;
+  kind: string;
+  /** `prisoner` / `warden` for a prompt, else null. */
+  actor: string | null;
+  /** Text the agent read or wrote, when the step carries any. */
+  text: string | null;
+  tool_name: string | null;
+  tool_call_id: string | null;
+  /** Arguments of a tool call, or the payload of a tool return. */
+  content: JsonObject | null;
+};
+
+/** `ToolCallRecord` — one requested tool call, whatever its outcome. */
+export type ToolCallRecord = {
+  event_id: string;
+  timestamp: string;
+  actor: string;
+  tool: string | null;
+  arguments: JsonObject;
+  /** Null for a call the Engine refused before running. */
+  success: boolean | null;
+  exit_code: number | null;
+  error: string | null;
+  failure_category: string | null;
+};
+
+/**
+ * `ThoughtRecord` — one piece of narration an agent produced for the match log.
+ *
+ * This is what the agent chose to report. Arbiter does not capture or store a
+ * model's private chain of thought, so there is none behind this.
+ */
+export type ThoughtRecord = {
+  event_id: string;
+  timestamp: string;
+  actor: string;
+  content: string;
+};
+
+/** `TrapEvent` — one trap firing, and where in the match it happened. */
+export type TrapEvent = {
+  event_id: string;
+  timestamp: string;
+  /** The trap tool that fired. */
+  trap: string | null;
+  /** The path or process name it was watching. */
+  target: string | null;
+  /** The Prisoner's turn in progress when it fired. */
+  prisoner_turn: number | null;
+  /** The Warden's turn at the same moment. */
+  warden_turn: number | null;
+};
+
+/**
+ * `MatchEventRecord` — a raw match event, the catch-all for whatever the shaped
+ * listings do not cover.
+ *
+ * Keyed on `event_id` and without the `match_id` the archive's own event type
+ * carries, because the reviewer is always answering about one match.
+ */
+export type ReviewMatchEvent = {
+  event_id: string;
+  timestamp: string;
+  actor: string;
+  event_type: string;
+  action: JsonObject;
+  result: JsonObject | null;
+};
+
+/**
+ * `ReviewStrategyRequest` — body for `POST /api/v1/strategies/review`.
+ *
+ * Names the strategy to improve and the match to review it against, plus the
+ * model and key doing the reviewing. The key travels in the body rather than the
+ * query string so it cannot reach a URL, a log or browser history.
+ *
+ * The answer is streamed and never stored: promoting what comes back is a
+ * separate, deliberate `save-strategy`.
+ */
+export type ReviewStrategyRequest = {
+  strategy_id: string;
+  match_id: string;
+  provider: string;
+  model: string;
+  api_key: string;
+};
+
+/** One Server-Sent Event frame from the strategy-review stream. */
+export type ReviewEvent = {
+  type:
+    | "review_started"
+    | "review_tool_call"
+    | "review_tool_result"
+    | "review_finished"
+    | "review_error";
+  strategy_id?: string;
+  match_id?: string;
+  /** `review_tool_call`: the read the agent is making. */
+  tool?: string;
+  arguments?: JsonObject;
+  /** `review_tool_result`: whether that read worked. */
+  success?: boolean;
+  error?: string | null;
+  /** `review_finished`: the proposed strategy. */
+  output?: string;
+  /** `review_error`: why the review stopped. */
+  detail?: string;
+};
+
 /** `PaginationMeta` — paging envelope shared by list responses. */
 export type PaginationMeta = {
   page: number;

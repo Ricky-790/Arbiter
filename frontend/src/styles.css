@@ -2665,19 +2665,15 @@
     white-space: pre-wrap;
   }
 
+  /* The lineage row is a link with a review action beside it rather than one
+     link, because a button cannot live inside an anchor. */
   .lineage-row {
-    position: relative;
-    display: grid;
-    grid-template-columns:
-      minmax(10rem, 1fr) minmax(14rem, 1.2fr) 8rem minmax(9rem, 0.6fr)
-      2rem;
+    display: flex;
+    gap: 1rem;
     align-items: center;
-    gap: 1.25rem;
     border-bottom: 1px solid var(--color-border);
-    padding: 1rem 0.8rem 1rem 0;
-    transition:
-      background 180ms ease,
-      padding 180ms ease;
+    padding-right: 0.8rem;
+    transition: background 180ms ease;
   }
 
   .lineage-row.is-origin {
@@ -2686,7 +2682,47 @@
 
   .lineage-row:hover {
     background: var(--color-panel);
+  }
+
+  .lineage-row-link {
+    display: grid;
+    flex: 1;
+    min-width: 0;
+    grid-template-columns:
+      minmax(10rem, 1fr) minmax(14rem, 1.2fr) 8rem minmax(9rem, 0.6fr)
+      2rem;
+    align-items: center;
+    gap: 1.25rem;
+    padding: 1rem 0;
+    text-decoration: none;
+    transition: padding 180ms ease;
+  }
+
+  .lineage-row:hover .lineage-row-link {
     padding-left: 1rem;
+  }
+
+  .lineage-review {
+    display: inline-flex;
+    flex-shrink: 0;
+    gap: 0.4rem;
+    align-items: center;
+    border: 1px solid var(--color-border);
+    padding: 0.5rem 0.7rem;
+    color: var(--color-muted-foreground);
+    font-family: var(--font-mono);
+    font-size: 0.6rem;
+    letter-spacing: 0.08em;
+    text-decoration: none;
+    text-transform: uppercase;
+    transition:
+      border-color 180ms ease,
+      color 180ms ease;
+  }
+
+  .lineage-review:hover {
+    border-color: var(--color-primary);
+    color: var(--color-primary);
   }
 
   .lineage-row-challenge {
@@ -2730,6 +2766,312 @@
     color: var(--color-primary);
     opacity: 1;
     transform: translate(2px, -2px);
+  }
+
+  /* Review: one strategy against one match, one side only. */
+  .review-title {
+    margin-top: 1.6rem;
+    font-family: var(--font-display);
+    font-size: clamp(1.9rem, 4vw, 2.9rem);
+    letter-spacing: -0.06em;
+  }
+
+  .review-context {
+    display: grid;
+    grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
+    gap: 1.25rem;
+    margin-top: 1.6rem;
+  }
+
+  .review-context-strategy,
+  .review-context-match {
+    border-left: 2px solid var(--color-border);
+    padding-left: 0.8rem;
+  }
+
+  .review-context p {
+    margin-top: 0.5rem;
+    color: var(--color-foreground);
+    font-size: 0.85rem;
+    line-height: 1.6;
+    white-space: pre-wrap;
+  }
+
+  .review-context-match p {
+    color: var(--color-muted-foreground);
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+  }
+
+  .review-context-outcome {
+    display: flex;
+    gap: 0.7rem;
+    align-items: center;
+  }
+
+  /* Each listing is read as a log rather than a table: one row per step, in the
+     order it happened. */
+  .review-stream {
+    margin-top: 1.1rem;
+    border-top: 1px solid var(--color-border);
+  }
+
+  .review-stream.is-compact .review-line-text {
+    font-size: 0.7rem;
+  }
+
+  .review-line {
+    display: grid;
+    grid-template-columns: 4.5rem 9rem minmax(0, 1fr);
+    gap: 1rem;
+    align-items: baseline;
+    border-bottom: 1px solid var(--color-border);
+    padding: 0.55rem 0;
+  }
+
+  .review-line-index {
+    color: var(--color-muted-foreground);
+    font-family: var(--font-mono);
+    font-size: 0.58rem;
+    letter-spacing: 0.06em;
+  }
+
+  .review-line-kind {
+    overflow: hidden;
+    color: var(--color-muted-foreground);
+    font-family: var(--font-mono);
+    font-size: 0.58rem;
+    letter-spacing: 0.08em;
+    text-overflow: ellipsis;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+
+  .review-line-text {
+    min-width: 0;
+    color: var(--color-foreground);
+    font-size: 0.78rem;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .review-line-payload {
+    color: var(--color-muted-foreground);
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+  }
+
+  .review-tool {
+    margin-right: 0.5rem;
+    color: var(--color-primary);
+    font-weight: 400;
+  }
+
+  .review-line.is-failed .review-line-kind,
+  .review-line-error {
+    color: var(--color-destructive);
+  }
+
+  .review-line-error {
+    display: block;
+    margin-top: 0.3rem;
+    font-family: var(--font-mono);
+    font-size: 0.66rem;
+  }
+
+  .review-line.is-system .review-line-kind {
+    color: var(--color-muted-foreground);
+    opacity: 0.75;
+  }
+
+  /* The analysis brief: not a listing, and not foldable. A panel with its own
+     frame, set directly under the stats it acts on. */
+  .review-brief {
+    margin-top: 2.6rem;
+    border: 1px solid var(--color-border);
+    border-top: 2px solid var(--color-primary);
+    background: var(--color-panel);
+    padding: 1.5rem 1.6rem 1.6rem;
+  }
+
+  .review-brief-head h2 {
+    margin-top: 0.7rem;
+    font-family: var(--font-display);
+    font-size: 1.7rem;
+    letter-spacing: -0.05em;
+  }
+
+  .review-brief-head p {
+    max-width: 74ch;
+    margin-top: 0.6rem;
+    color: var(--color-muted-foreground);
+    font-size: 0.8rem;
+    line-height: 1.65;
+  }
+
+  .review-brief-body {
+    margin-top: 1.4rem;
+  }
+
+  .review-run-seats {
+    display: grid;
+    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr) minmax(0, 1fr);
+    gap: 0.7rem;
+    margin-top: 1rem;
+  }
+
+  .review-run-actions {
+    margin-top: 1rem;
+  }
+
+  /* A section heading with an icon keeps it on the text's baseline rather than
+     letting it wrap to a line of its own. */
+  .archive-section .agent-heading h2 {
+    display: flex;
+    gap: 0.55rem;
+    align-items: center;
+  }
+
+  .archive-section .agent-heading h2 svg {
+    flex-shrink: 0;
+    color: var(--color-primary);
+  }
+
+  /* The fold control is the heading itself, so the whole line is the hit area
+     and the chevron is the only thing that says the section opens. */
+  .section-toggle {
+    display: inline-flex;
+    gap: 0.55rem;
+    align-items: center;
+    font: inherit;
+    color: inherit;
+    letter-spacing: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .section-toggle:hover {
+    color: var(--color-primary);
+  }
+
+  .archive-section .agent-heading h2 .section-chevron {
+    color: var(--color-muted-foreground);
+    transition: transform 180ms ease;
+  }
+
+  .section-toggle[aria-expanded="true"] .section-chevron {
+    transform: rotate(90deg);
+  }
+
+  /* A tool return's payload, folded away until asked for. */
+  .review-show-output {
+    display: inline-block;
+    margin-top: 0.35rem;
+    margin-left: 0.5rem;
+    color: var(--color-primary);
+    font-family: var(--font-mono);
+    font-size: 0.66rem;
+    cursor: pointer;
+  }
+
+  .review-show-output:hover {
+    text-decoration: underline;
+  }
+
+  .review-output {
+    display: block;
+    max-height: 16rem;
+    overflow: auto;
+    margin-top: 0.45rem;
+    border-left: 2px solid var(--color-border);
+    padding: 0.5rem 0.7rem;
+    background: var(--color-panel);
+    color: var(--color-muted-foreground);
+    font-family: var(--font-mono);
+    font-size: 0.66rem;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  /* One side, one match: the stats card is the full width rather than half a
+     two-up grid with nothing beside it. */
+  .review-stats {
+    grid-template-columns: minmax(0, 1fr);
+    margin-top: 1.1rem;
+  }
+
+  .review-log {
+    max-height: 18rem;
+    margin-top: 1.2rem;
+    overflow-y: auto;
+    border: 1px solid var(--color-border);
+    background: var(--color-panel);
+    padding: 0.9rem 1rem;
+  }
+
+  .review-log-line {
+    display: flex;
+    gap: 0.45rem;
+    align-items: baseline;
+    color: var(--color-muted-foreground);
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    line-height: 1.75;
+  }
+
+  .review-log-line.is-started {
+    color: var(--color-primary);
+  }
+
+  .review-log-line.is-error {
+    color: var(--color-destructive);
+  }
+
+  .review-log-line.is-pending {
+    color: var(--color-foreground);
+  }
+
+  .review-proposal {
+    margin-top: 1.4rem;
+    border: 1px solid var(--color-primary);
+    background: var(--color-panel);
+    padding: 1.1rem 1.2rem 1.2rem;
+  }
+
+  .review-proposal-head {
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .review-proposal-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.7rem;
+    align-items: center;
+  }
+
+  .review-proposal-text {
+    margin-top: 0.8rem;
+    border-color: var(--color-border);
+  }
+
+  .review-proposal-note {
+    display: flex;
+    gap: 0.5rem;
+    align-items: start;
+    margin-top: 0.8rem;
+    color: var(--color-muted-foreground);
+    font-size: 0.7rem;
+    line-height: 1.6;
+  }
+
+  .review-proposal-note svg {
+    flex-shrink: 0;
+    margin-top: 0.15rem;
   }
 
   /* Forks tab: one saved checkpoint per row, read as a record rather than a
@@ -3531,6 +3873,29 @@
 
   /* The archive rows collapse the same way: keep the subject and drop the
      provenance columns, which are one click away on the detail page. */
+  .review-context,
+  .review-run-seats {
+    grid-template-columns: 1fr;
+  }
+
+  .review-brief {
+    padding: 1.2rem 1.1rem 1.3rem;
+  }
+
+  .review-proposal-head {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .review-line {
+    grid-template-columns: 3.5rem minmax(0, 1fr);
+    gap: 0.4rem 0.8rem;
+  }
+
+  .review-line-text {
+    grid-column: 1 / -1;
+  }
+
   .strategy-row {
     grid-template-columns: 2.5rem 5.5rem minmax(0, 1fr);
     gap: 0.7rem;
@@ -3546,7 +3911,7 @@
     display: none;
   }
 
-  .lineage-row {
+  .lineage-row-link {
     grid-template-columns: minmax(0, 1fr) auto;
     gap: 0.4rem 0.8rem;
   }
@@ -3567,6 +3932,10 @@
   .lineage-row-caption,
   .lineage-row-arrow {
     display: none;
+  }
+
+  .lineage-review {
+    padding: 0.45rem 0.55rem;
   }
 
   .match-masthead {

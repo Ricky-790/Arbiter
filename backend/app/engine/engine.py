@@ -14,6 +14,7 @@ from pydantic_ai import ToolReturn
 from app.agents.base import AgentUnavailableError, dump_agent_history
 from app.agents.models import AgentType
 from app.agents.tools import (
+    PRISONER_BASH_OUTPUT_CHARS,
     PRISONER_LOG_PATH,
     ToolCall,
     ToolExecutionContext,
@@ -560,6 +561,7 @@ class Engine:
                     },
                 )
             raise
+        result = self._cap_prisoner_bash_output(actor, call, result)
         if span is not None:
             set_span_attributes(
                 span,
@@ -594,6 +596,58 @@ class Engine:
                 self.state.blocked_trap_name = None
         return result
 
+    def _cap_prisoner_bash_output(
+        self, actor: AgentType, call: ToolCall, result: ToolResult
+    ) -> ToolResult:
+        """Bound how much one Prisoner ``bash`` call can return.
+
+        Only the head of the output is kept, so a command that dumps a
+        filesystem reveals no more than a command that dumps a page -- the cap
+        cannot be worked around by aiming it at something larger. The result
+        says plainly that it was cut, and by how much, so the Prisoner is never
+        reasoning from output it does not know is incomplete.
+
+        Applied here rather than in ``SandboxManager`` for the same reason
+        credits and cooldowns are: it is a game rule about the Prisoner, not a
+        property of the sandbox, and it must not apply to the Warden.
+        """
+        if actor is not AgentType.PRISONER or call.name != "bash":
+            return result
+
+        def cap(text: str) -> tuple[str, int]:
+            if len(text) <= PRISONER_BASH_OUTPUT_CHARS:
+                return text, 0
+            dropped = len(text) - PRISONER_BASH_OUTPUT_CHARS
+            return (
+                text[:PRISONER_BASH_OUTPUT_CHARS]
+                + f"\n...[output truncated: {dropped} more characters follow]",
+                dropped,
+            )
+
+        output, dropped_output = cap(result.output or "")
+        error, dropped_error = cap(result.error or "")
+        dropped = dropped_output + dropped_error
+        if dropped == 0:
+            return result
+        return result.model_copy(
+            update={
+                "output": output,
+                "error": error or None,
+                "notice": (
+                    f"bash output for the Prisoner is capped at "
+                    f"{PRISONER_BASH_OUTPUT_CHARS} characters per call and this "
+                    f"one produced {dropped} more. Narrow the command "
+                    "(grep/head/tail/wc), or run it as several calls, to see "
+                    "the rest."
+                ),
+                "metadata": {
+                    **result.metadata,
+                    "output_truncated": True,
+                    "output_chars_dropped": dropped,
+                },
+            }
+        )
+
     def _timed_out(self, call: ToolCall) -> ToolResult:
         """The result an agent gets when its tool call is abandoned.
 
@@ -623,19 +677,19 @@ class Engine:
         async with self._action_lock:
             if self.state.status is not MatchStatus.RUNNING:
                 return False
-            matched = self.traps.matches(self.state, event)
+            matched = self.traps.matching_trap(self.state, event)
             await self._persist(
                 "sandbox_event",
                 actor=event.user or "system",
                 action=event.model_dump(
                     mode="json", exclude={"timestamp"}, exclude_none=True
                 ),
-                result={"matched_trap": matched},
+                result={"matched_trap": matched.tool_name if matched else None},
                 timestamp=event.timestamp,
             )
-            if not matched:
+            if matched is None:
                 return False
-            trap = self.traps.trigger(self.state)
+            trap = self.traps.trigger(self.state, matched)
             # Mid-replay "now" is the instant being replayed, so the Warden's
             # cooldown/reaction fields land on the same clock as can_act's
             # ``now=replay_at``. Using the wall clock here would write a
@@ -645,8 +699,8 @@ class Engine:
             )
             recorded = self._record(
                 "trap_triggered",
-                trap=trap.tool_name if trap else None,
-                target=trap.target if trap else None,
+                trap=trap.tool_name,
+                target=trap.target,
                 prisoner_turn=self.state.prisoner.turns,
                 reaction_until=reaction_until.isoformat(),
             )
@@ -658,16 +712,16 @@ class Engine:
                 record_match_event(
                     "trap_triggered",
                     match_id=self.state.match_id,
-                    trap=trap.tool_name if trap else None,
-                    target=trap.target if trap else None,
+                    trap=trap.tool_name,
+                    target=trap.target,
                 )
             await self._persist(
                 "trap_triggered",
                 result={
-                    "trap": trap.tool_name if trap else None,
+                    "trap": trap.tool_name,
                     # The target is what tells two firings of the same trap tool
                     # apart, and the turn says where in the match it happened.
-                    "target": trap.target if trap else None,
+                    "target": trap.target,
                     "prisoner_turn": self.state.prisoner.turns,
                     "warden_turn": self.state.warden.turns,
                 },
@@ -995,6 +1049,25 @@ class Engine:
         # once the users and files above exist.
         if challenge.setup_script:
             commands.append(challenge.setup_script)
+
+        # Home isolation, deliberately last so nothing after it can loosen it.
+        # ``useradd -m`` leaves the homes world-readable on this image, which
+        # would let the Prisoner read the Warden's scratchpad -- its plan -- and
+        # vice versa. Mode 700 makes each home reachable only by its owner.
+        #
+        # This is one-directional in the strong sense only from the Prisoner's
+        # side: the Warden holds ``NOPASSWD:ALL`` root, and root ignores file
+        # modes, so a Warden that deliberately runs ``sudo cat`` can still read
+        # the Prisoner's home. Nothing in the OS can take that back without
+        # taking the Warden's root, which the challenges need. The Warden's
+        # instructions forbid it instead, and ``peek_prisoner_logs`` is its one
+        # sanctioned window into the Prisoner's side.
+        for user in (challenge.prisoner_user, challenge.warden_user):
+            home = f"/home/{shlex.quote(user)}"
+            commands.append(
+                f"mkdir -p {home} && chown {shlex.quote(user)} {home} && "
+                f"chmod 700 {home}"
+            )
 
         return commands
 

@@ -11,6 +11,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from pydantic_ai import ToolReturn
+from pydantic_ai.exceptions import ModelHTTPError
 
 from app.agents.base import ToolChoosingAgent
 from app.agents.tools.models import ToolCall, ToolResult
@@ -39,10 +40,30 @@ class StrategyReviewerAgent(ToolChoosingAgent):
     which match to ask about.
     """
 
-    #: A review is one run with nobody pacing it, so bound the model requests.
-    #: Generous for the eight tools available, low enough that a reviewer that
-    #: keeps asking without concluding ends in a failure rather than a bill.
+    #: Bound the model requests, this is unsupervised step
     _request_limit: int | None = 30
+
+    #: Cooldown before retrying a retryable provider failure (429/503/504).
+    #:
+    #: A review is one-shot with nobody pacing it: the caller is watching a
+    #: stream, not a match clock, so a provider hiccup is worth riding out
+    #: instead of failing the whole review. Longer than a match agent's 30s
+    #: because a review has no wall clock to respect -- the match's timing is
+    #: deliberately *not* this path.
+    _review_retry_wait_seconds: float = 45.0
+
+    @classmethod
+    def _retry_wait(cls, error: ModelHTTPError, *, status: int) -> float:
+        """A flat 45s cooldown for every retryable provider failure.
+
+        The base class honours the provider's ``Retry-After`` and otherwise
+        waits 30s. The reviewer fixes one number instead. Waiting longer than a
+        provider asks is always safe -- it can only help the limit clear -- and
+        a predictable delay is easier to reason about than one that varies per
+        response, especially since a short ``Retry-After`` would just retry
+        back into the same limit and spend one of the three attempts.
+        """
+        return cls._review_retry_wait_seconds
 
     def __init__(
         self,
