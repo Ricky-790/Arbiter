@@ -73,6 +73,9 @@ EXPOSE 10000
 # worker service overrides it, and nothing else about the image changes.
 ENV CELERY_QUEUES=arbiter.matches
 
+# Health checks go to /health (the endpoint answers any path, so `/` works too).
+ENV ARBITER_SERVICE_NAME=arbiter-worker
+
 # The health endpoint is started first so the platform sees the port open, then
 # `exec` hands the container to Celery: it becomes PID 1 and receives the stop
 # signal directly, and the container's lifetime is the worker's lifetime.

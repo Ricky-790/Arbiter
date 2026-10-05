@@ -72,6 +72,20 @@ another — so a platform can build whichever service it needs:
 fork worker from `Dockerfile.worker` with `CELERY_QUEUES=arbiter.forks` and skip
 the third file.
 
+Point every service's health check at **`/health`**:
+
+| Service | Health check |
+| --- | --- |
+| API | `GET /health` served by FastAPI (`/` answers too) |
+| Match worker | `GET /health` on the worker's `$PORT` |
+| Fork worker | `GET /health` on the worker's `$PORT` |
+
+Both are liveness only — neither touches Postgres nor Redis, so a dependency
+blip cannot fail a deploy or start a restart loop. The workers' body names the
+pool that answered (`arbiter-worker`, `arbiter-fork-worker`), so a check pointed
+at the wrong service is recognisable instead of silently green. The worker
+endpoint answers any path, so a wrong check path cannot fail a deploy either.
+
 The fork worker deliberately does not need the model provider keys or
 `ARBITER_BYOK_SECRET`: replaying recorded tool calls builds no agents, so it has
 no reason to hold a credential it never uses.

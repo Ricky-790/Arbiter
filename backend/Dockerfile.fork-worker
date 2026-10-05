@@ -96,6 +96,12 @@ EXPOSE 10000
 # worker keeps the `arbiter.matches` default from `Dockerfile.worker`.
 ENV CELERY_QUEUES=arbiter.forks
 
+# Health checks go to /health (the endpoint answers any path, so `/` works too).
+# This names the service in the health body, so the two worker pools are told
+# apart in the platform's health output instead of both reporting the generic
+# `arbiter-worker`.
+ENV ARBITER_SERVICE_NAME=arbiter-fork-worker
+
 # The health endpoint is started first so the platform sees the port open, then
 # `exec` hands the container to Celery: it becomes PID 1 and receives the stop
 # signal directly, and the container's lifetime is the worker's lifetime.

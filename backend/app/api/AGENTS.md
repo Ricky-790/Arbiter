@@ -15,6 +15,24 @@ When expanding the API, treat it as an adapter around application/domain service
 - Do not expose secrets in responses or logs.
 - Match results must come from server-side Engine state.
 
+## Health
+
+`GET /health` answers a liveness probe: this process can serve HTTP. `/` answers
+the same body, because that is Render's default health-check path and a 404 there
+would fail a deploy. `routes/health.py` holds both.
+
+It is deliberately **not** under `/api/v1`: a platform probes a literal path, and
+a health check is infrastructure rather than versioned API surface. Moving it
+under the prefix would make every configured check a 404.
+
+It touches neither Postgres nor Redis. A dependency blip is not something
+restarting this process fixes, and a check wired to the database turns a
+transient outage into a restart loop. A check that must *prove* dependencies are
+reachable is a readiness concern and belongs at its own endpoint.
+
+The worker pools answer the same question from `worker_health.py`, which binds
+their `$PORT` and reports which pool replied.
+
 ## Model selection and BYOK keys
 
 `GET /matches/models` returns the catalogue: each provider and the models it
