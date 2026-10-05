@@ -13,6 +13,7 @@ from app.db.models import (
     MatchAgentMessages,
     MatchEvent,
     MatchFork,
+    Strategy,
 )
 
 
@@ -26,6 +27,7 @@ class DbModelTests(unittest.TestCase):
                 "match_events",
                 "match_forks",
                 "matches",
+                "strategies",
             },
         )
 
@@ -95,6 +97,39 @@ class DbModelTests(unittest.TestCase):
             self.assertTrue(cols[indexed].index, indexed)
         # status/winner stay plain VARCHAR until asked to change.
         self.assertIsInstance(cols["status"].type, type(cols["winner"].type))
+
+    def test_match_strategy_columns_are_nullable_jsonb(self) -> None:
+        """Both are written after the row exists, so neither can be NOT NULL."""
+        cols = Match.__table__.columns
+        for name in ("strategy", "strategy_id"):
+            self.assertIsInstance(cols[name].type, postgresql.JSONB, name)
+            self.assertTrue(cols[name].nullable, name)
+
+    def test_strategy_table_columns_and_unique_key(self) -> None:
+        table = Strategy.__table__
+        self.assertFalse(table.columns["match_id"].nullable)
+        self.assertFalse(table.columns["challenge_id"].nullable)
+        self.assertFalse(table.columns["user"].nullable)
+        self.assertFalse(table.columns["one_line_description"].nullable)
+        self.assertFalse(table.columns["strategy"].nullable)
+        # Lineage is optional: the first strategy of a line has no ancestor.
+        self.assertTrue(table.columns["origin_strat_id"].nullable)
+        self.assertEqual(
+            {fk.parent.name: fk.column.table.name for fk in table.foreign_keys},
+            {
+                "match_id": "matches",
+                "challenge_id": "challenges",
+                "origin_strat_id": "strategies",
+            },
+        )
+        self.assertEqual(
+            {
+                tuple(column.name for column in constraint.columns)
+                for constraint in table.constraints
+                if isinstance(constraint, UniqueConstraint)
+            },
+            {("match_id", "user")},
+        )
 
     def test_match_events_columns_and_composite_index(self) -> None:
         cols = MatchEvent.__table__.columns

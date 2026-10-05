@@ -166,6 +166,38 @@ It should not execute tools.
 
 It should not enforce credits or cooldowns.
 
+## `review_tools/` — a second, separate registry
+
+`review_tools/` holds the Strategy Reviewer's tools. They are **not** match
+capabilities: they read a finished match through `app.reviewer` and cannot act
+inside a sandbox. That is why `build_review_registry()` is separate from
+`build_default_registry()` — the reviewer agent must never be handed a way to
+affect a match, and a match agent must never be handed a way to read another
+one.
+
+They also do not subclass `BaseTool`, which carries `allowed_agents` and
+`ToolCost` — neither means anything for a read. `ReviewTool` has `name`,
+`description` and a typed `execute()`, which is all the registry and the
+tool-definition builder need. `is_available_to` returns `False` so
+`get_for_agent` finds nothing.
+
+**The match id is never an argument.** It is bound to a `ReviewContext` before
+the run and handed to every tool, so the model chooses *which question* to ask,
+never *which match* to ask about. A review tool that took a `match_id` would let
+the model read any match, including one it should not see.
+
+Their `execute()` signatures are what the model sees, so they follow the same
+rule as match tools: typed parameters, `n` for a page size, `user` for a side,
+and a recoverable `ToolResult(success=False, ...)` for anything the agent got
+wrong — a bad side, a bad bound, an unknown `event_type` — rather than raising,
+so the model can correct itself. (It does: a live run guessed a wrong
+`event_type`, was told the valid ones, and retried without it.)
+
+Pages go to the model in full. Never truncate one: a silently shortened match is
+worse than a large one, because the agent reasons from missing data without
+knowing it. Over budget, attach a `notice` instead — the same rule as match
+tools.
+
 ## Adding a tool
 
 1. Define the typed tool class.

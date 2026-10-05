@@ -17,13 +17,18 @@ import type {
   MatchEventSchema,
   MatchListResponse,
   MatchListSchema,
+  MatchSummaryResponse,
   ModelCheckRequest,
   ModelCheckResponse,
+  PageMeta,
+  SaveStrategyRequest,
   SortOrder,
   SpectateEvent,
   StartForkMatchRequest,
   StartMatchRequest,
   StartMatchResponse,
+  StrategyDetailResponse,
+  StrategySchema,
 } from "./dto";
 
 const configuredBaseUrl =
@@ -176,6 +181,78 @@ export function startFromFork(
   });
 }
 
+/**
+ * `POST /api/v1/strategies/save-strategy` — promote one side's strategy into
+ * the library.
+ *
+ * The body names the match and the side and nothing else: the text is read off
+ * the match row, so what is saved is exactly what the match ran, and the
+ * one-line description is derived from that text rather than accepted. Safe to
+ * call twice — a repeat returns the row that already exists and repairs the
+ * link back onto the match.
+ */
+export function saveStrategy(
+  payload: SaveStrategyRequest,
+): Promise<StrategySchema> {
+  return request<StrategySchema>("/api/v1/strategies/save-strategy", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+/**
+ * `GET /api/v1/strategies/all` — one page of the whole library, newest first.
+ *
+ * `challengeId` narrows it to one challenge, which is the usual question: a
+ * strategy only means anything against the challenge it was played on. An id
+ * that matches nothing is an empty page rather than an error, since it is a
+ * filter and not a lookup.
+ *
+ * The library grows for as long as matches are run, so this is paged.
+ */
+export function listStrategies({
+  challengeId,
+  offset = 0,
+  limit = 20,
+}: { challengeId?: string } & PageParams = {}): Promise<
+  PageMeta<StrategySchema>
+> {
+  const query = new URLSearchParams({
+    offset: String(offset),
+    limit: String(limit),
+  });
+  if (challengeId !== undefined && challengeId !== "") {
+    query.set("challenge_id", challengeId);
+  }
+  return request<PageMeta<StrategySchema>>(`/api/v1/strategies/all?${query}`);
+}
+
+/**
+ * `GET /api/v1/strategies?strategy_id=...` — one strategy and its lineage.
+ *
+ * Returns the strategy, the match it was promoted from, and a page of the
+ * matches started from it.
+ */
+export function getStrategy({
+  strategyId,
+  offset = 0,
+  limit = 20,
+}: { strategyId: string } & PageParams): Promise<StrategyDetailResponse> {
+  const query = new URLSearchParams({
+    strategy_id: strategyId,
+    offset: String(offset),
+    limit: String(limit),
+  });
+  return request<StrategyDetailResponse>(`/api/v1/strategies?${query}`);
+}
+
+/** Query options shared by the offset/limit listings. */
+export type PageParams = {
+  offset?: number;
+  limit?: number;
+};
+
 /** Query options shared by the paginated list endpoints. */
 export type ListPageParams = {
   page?: number;
@@ -215,6 +292,23 @@ export function listMatchEvents(
 export function getMatch(matchId: string): Promise<MatchListSchema> {
   const query = new URLSearchParams({ match_id: matchId });
   return request<MatchListSchema>(`/api/v1/matches/match?${query}`);
+}
+
+/**
+ * `GET /api/v1/reviewer/summary` — everything about a match that stays small.
+ *
+ * Always answers with a list, one entry per side summarised, so its shape never
+ * depends on the request: this asks for both, Prisoner first, and each entry is
+ * scoped entirely to its own side — its stats, its strategy, its opening
+ * message — with no opponent block. Comparing the two sides is reading two
+ * entries of the same shape. Anything that grows with the length of the match
+ * has its own paginated endpoint instead, so this stays bounded.
+ */
+export function getMatchSummary(
+  matchId: string,
+): Promise<MatchSummaryResponse[]> {
+  const query = new URLSearchParams({ match_id: matchId });
+  return request<MatchSummaryResponse[]>(`/api/v1/reviewer/summary?${query}`);
 }
 
 /**

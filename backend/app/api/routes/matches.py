@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from collections.abc import AsyncIterator
 from typing import Literal
 from uuid import UUID, uuid4
@@ -21,6 +20,7 @@ from app.agents.agents_directory import (
     join_model_name,
     models_for,
 )
+from app.api import sse
 from app.api.schemas.dto_models import (
     AvailableModelsResponse,
     ForkDetailSchema,
@@ -47,6 +47,7 @@ from app.db.services import (
     match_events_service,
     match_forks_service,
     matches_service,
+    strategies_service,
 )
 from app.db.services.match_fork_service import FAILED as FORK_FAILED
 from app.db.services.match_fork_service import READY as FORK_READY
@@ -64,18 +65,9 @@ logger = get_logger()
 
 router = APIRouter(prefix="/api/v1/matches", tags=["matches"])
 
-SSE_MEDIA_TYPE = "text/event-stream"
-
 #: Events returned per page by the paginated list endpoints.
 DEFAULT_PAGE_SIZE = 20
 MAX_PAGE_SIZE = 100
-
-#: SSE keep-alive comments keep proxies from closing an idle connection.
-SSE_HEADERS = {
-    "Cache-Control": "no-cache",
-    "Connection": "keep-alive",
-    "X-Accel-Buffering": "no",
-}
 
 
 @router.get("/models", response_model=AvailableModelsResponse)
@@ -175,6 +167,17 @@ async def start_match(
     if challenge is None:
         raise HTTPException(status_code=404, detail="Challenge not found")
 
+    # Resolved before any key is stored or queued, so an unusable strategy id
+    # fails the request outright instead of leaving a match behind.
+    strategy = await _resolve_strategies(
+        session,
+        challenge_id=payload.challenge_id,
+        prisoner_strategy_id=payload.prisoner_strategy_id,
+        prisoner_suggestions=payload.prisoner_suggestions,
+        warden_strategy_id=payload.warden_strategy_id,
+        warden_suggestions=payload.warden_suggestions,
+    )
+
     # Both sides are confirmed with their providers concurrently: each check is
     # a network round trip, and the two are independent.
     prisoner_key, warden_key = await asyncio.gather(
@@ -214,6 +217,10 @@ async def start_match(
         warden_model=payload.warden_model,
         warden_provider=payload.warden_provider,
         win_condition=challenge.win_condition,
+        strategy=strategy,
+        strategy_id=_named_strategy_ids(
+            payload.prisoner_strategy_id, payload.warden_strategy_id
+        ),
     )
 
     message = MatchStartMessage(
@@ -223,8 +230,8 @@ async def start_match(
         prisoner_model=payload.prisoner_model,
         warden_provider=payload.warden_provider,
         warden_model=payload.warden_model,
-        prisoner_suggestions=payload.prisoner_suggestions,
-        warden_suggestions=payload.warden_suggestions,
+        prisoner_suggestions=strategy.get("prisoner"),
+        warden_suggestions=strategy.get("warden"),
     )
     try:
         # Celery's client is blocking; keep the request loop free.
@@ -423,6 +430,17 @@ async def start_from_fork(
     if parent is None:
         raise HTTPException(status_code=404, detail="Parent match not found")
 
+    # Resolved against the parent's challenge: a fork stays on that challenge, so
+    # a strategy from a different one is not usable here.
+    strategy = await _resolve_strategies(
+        session,
+        challenge_id=parent.challenge_id,
+        prisoner_strategy_id=payload.prisoner_strategy_id,
+        prisoner_suggestions=payload.prisoner_suggestions,
+        warden_strategy_id=payload.warden_strategy_id,
+        warden_suggestions=payload.warden_suggestions,
+    )
+
     # Both sides are confirmed with their providers concurrently: each check is
     # a network round trip, and the two are independent.
     prisoner_key, warden_key = await asyncio.gather(
@@ -460,6 +478,10 @@ async def start_from_fork(
         warden_model=payload.warden_model,
         warden_provider=payload.warden_provider,
         win_condition=parent.win_condition,
+        strategy=strategy,
+        strategy_id=_named_strategy_ids(
+            payload.prisoner_strategy_id, payload.warden_strategy_id
+        ),
         # The fork's own branch point, so the match worker knows what to resume.
         parent_match_id=fork.parent_match_id,
         branch_event_id=fork.branch_event_id,
@@ -472,8 +494,8 @@ async def start_from_fork(
         prisoner_model=payload.prisoner_model,
         warden_provider=payload.warden_provider,
         warden_model=payload.warden_model,
-        prisoner_suggestions=payload.prisoner_suggestions,
-        warden_suggestions=payload.warden_suggestions,
+        prisoner_suggestions=strategy.get("prisoner"),
+        warden_suggestions=strategy.get("warden"),
     )
     try:
         await run_in_threadpool(enqueue_match_start, message)
@@ -506,9 +528,7 @@ async def verify_model(payload: ModelCheckRequest) -> ModelCheckResponse:
         return ModelCheckResponse(
             exists=False,
             reason="key_rejected",
-            detail=(
-                f"An API key is required to check {payload.provider} model names"
-            ),
+            detail=(f"An API key is required to check {payload.provider} model names"),
         )
     try:
         await check_model_exists(payload.provider, payload.model, api_key)
@@ -517,6 +537,85 @@ async def verify_model(payload: ModelCheckRequest) -> ModelCheckResponse:
             exists=False, reason=error.reason, detail=error.detail
         )
     return ModelCheckResponse(exists=True)
+
+
+def _named_strategy_ids(
+    prisoner_strategy_id: UUID | None, warden_strategy_id: UUID | None
+) -> dict[str, str]:
+    """The library ids a start request named, keyed by side, as JSONB strings.
+
+    Recorded on the new match so a saved strategy can be traced to every match
+    that ran it. Without this the id only ever pointed the other way -- from a
+    match to the strategy it produced -- and "which matches used this strategy"
+    would have nothing to read.
+
+    Only ids that were actually supplied appear; a side started from free text
+    has no library row to name.
+    """
+    return {
+        side: str(strategy_id)
+        for side, strategy_id in (
+            ("prisoner", prisoner_strategy_id),
+            ("warden", warden_strategy_id),
+        )
+        if strategy_id is not None
+    }
+
+
+async def _resolve_strategies(
+    session: AsyncSession,
+    *,
+    challenge_id: UUID,
+    prisoner_strategy_id: UUID | None,
+    prisoner_suggestions: str | None,
+    warden_strategy_id: UUID | None,
+    warden_suggestions: str | None,
+) -> dict[str, str]:
+    """Work out the strategy each side is started with.
+
+    A side given a ``*_strategy_id`` is started from that library strategy, and
+    the id wins over any free-text suggestions sent alongside it -- the explicit
+    reference is the more specific request. A side without one is started from
+    its suggestions, if it has any.
+
+    The result is keyed by side and omits sides with no strategy, so an empty
+    mapping means neither side got one. It is written to the match row *and*
+    sent to the worker as that side's suggestions, so what is fed to the agent
+    and what is later promoted to the library are the same text.
+
+    Raises:
+        HTTPException: 404 if a referenced strategy does not exist, or 400 if it
+            belongs to a different challenge -- a strategy is only meaningful
+            against the challenge it was played on.
+    """
+    requested = {"prisoner": prisoner_strategy_id, "warden": warden_strategy_id}
+    stored_by_id = await strategies_service.get_strategies(
+        [one for one in requested.values() if one is not None], session
+    )
+    supplied = {"prisoner": prisoner_suggestions, "warden": warden_suggestions}
+
+    resolved: dict[str, str] = {}
+    for side, strategy_id in requested.items():
+        if strategy_id is None:
+            text = supplied[side]
+            if text is not None and text.strip():
+                resolved[side] = text.strip()
+            continue
+        stored = stored_by_id.get(strategy_id)
+        if stored is None:
+            raise HTTPException(
+                status_code=404, detail=f"Strategy {strategy_id} not found"
+            )
+        if stored.challenge_id != challenge_id:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Strategy {strategy_id} was played on challenge "
+                    f"{stored.challenge_id}, not {challenge_id}"
+                ),
+            )
+        resolved[side] = stored.strategy
+    return resolved
 
 
 async def _resolve_side(
@@ -572,17 +671,17 @@ async def spectate_match(match_id: UUID = Query(...)) -> StreamingResponse:
     """
     return StreamingResponse(
         _event_stream(str(match_id)),
-        media_type=SSE_MEDIA_TYPE,
-        headers=SSE_HEADERS,
+        media_type=sse.SSE_MEDIA_TYPE,
+        headers=sse.SSE_HEADERS,
     )
 
 
 async def _event_stream(match_id: str) -> AsyncIterator[str]:
-    yield _sse({"match_id": match_id, "type": "stream_open"})
+    yield sse.frame({"match_id": match_id, "type": "stream_open"})
     try:
         async for payload in subscribe_match_events(match_id):
             if payload is None:
-                yield ": keep-alive\n\n"
+                yield sse.keep_alive()
                 continue
             yield f"data: {payload}\n\n"
     except asyncio.CancelledError:
@@ -590,13 +689,9 @@ async def _event_stream(match_id: str) -> AsyncIterator[str]:
         raise
     except Exception:
         logger.exception(f"Spectator stream failed for match {match_id}")
-        yield _sse({"match_id": match_id, "type": "stream_error"})
+        yield sse.frame({"match_id": match_id, "type": "stream_error"})
         return
-    yield _sse({"match_id": match_id, "type": "stream_closed"})
-
-
-def _sse(payload: dict) -> str:
-    return f"data: {json.dumps(payload)}\n\n"
+    yield sse.frame({"match_id": match_id, "type": "stream_closed"})
 
 
 def page_count(total: int, page_size: int) -> int:

@@ -13,7 +13,6 @@ structure this challenge expects; submit an object whose fields match it
 exactly. Submissions that do not match the structure are rejected before they
 are evaluated.
 
-Your file access (read_file, write_file) is limited to your own home directory /home/prisoner/; all paths resolve under there.
 Your scratchpad is persistent memory across the match.
 
 Use write_to_scratchpad whenever you discover information that will

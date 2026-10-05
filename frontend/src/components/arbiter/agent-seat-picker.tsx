@@ -1,4 +1,4 @@
-import { Check, KeyRound, Loader2, X } from "lucide-react";
+import { Check, KeyRound, Library, Loader2, X } from "lucide-react";
 
 import {
   Select,
@@ -7,7 +7,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import type { AvailableModelsResponse } from "@/lib/dto";
+import type { AvailableModelsResponse, StrategySchema } from "@/lib/dto";
 import {
   type AgentSeat,
   type ModelCheck,
@@ -15,14 +15,21 @@ import {
   modelsForProvider,
 } from "@/lib/use-agent-seats";
 
+/** The picker's "no saved strategy" choice: write the wording yourself. */
+const WRITE_YOUR_OWN = "custom";
+
 /**
  * One side's seat: the provider, the model under it, a key (every model is
- * BYOK), and optional tips for the agent. Shared by the launch page and the fork
+ * BYOK), and the strategy it runs. Shared by the launch page and the fork
  * workbench so the two make the same choice the same way.
  *
  * The model is a free-text field backed by a suggestion list, so an operator can
  * paste a name that is not curated. Whatever they enter is confirmed with the
  * provider before the match can start.
+ *
+ * A side's strategy is either a saved library entry or the operator's own text.
+ * `strategies` is what the picker offers; when a page has no library to draw on
+ * it passes none, and the field is simply the text box.
  */
 export function AgentSeatPicker({
   side,
@@ -30,11 +37,13 @@ export function AgentSeatPicker({
   hint,
   seat,
   models,
+  strategies,
   excluded,
   loading,
   onChooseProvider,
   onChooseModel,
   onApiKeyChange,
+  onChooseStrategy,
   onSuggestionsChange,
 }: {
   side: SeatSide;
@@ -42,17 +51,24 @@ export function AgentSeatPicker({
   hint: string;
   seat: AgentSeat;
   models: AvailableModelsResponse;
+  /** Saved strategies offered for this side; empty hides the picker. */
+  strategies?: StrategySchema[];
   /** The other side's pick, as `provider:model`; this side may not repeat it. */
   excluded: string;
   loading: boolean;
   onChooseProvider: (provider: string) => void;
   onChooseModel: (model: string) => void;
   onApiKeyChange: (value: string) => void;
+  onChooseStrategy?: (strategyId: string | null) => void;
   onSuggestionsChange: (value: string) => void;
 }) {
   const suggested = modelsForProvider(models, seat.provider).filter(
     (model) => `${seat.provider}:${model}` !== excluded,
   );
+  const library = strategies ?? [];
+  // Nothing saved for this side yet, so offering the choice would be a dead end.
+  const canPick = library.length > 0 && onChooseStrategy !== undefined;
+  const chosen = library.find((entry) => entry.id === seat.strategyId) ?? null;
 
   return (
     <div className={`agent-panel ${side}`}>
@@ -145,15 +161,65 @@ export function AgentSeatPicker({
       )}
 
       {seat.model !== "" && (
-        <textarea
-          value={seat.suggestions}
-          onChange={(event) => onSuggestionsChange(event.target.value)}
-          placeholder="Any suggestions for the agent..."
-          rows={3}
-          maxLength={2000}
-          aria-label={`${label} suggestions`}
-          className="field-textarea"
-        />
+        <div className="agent-strategy">
+          {canPick && (
+            <Select
+              value={seat.strategyId ?? WRITE_YOUR_OWN}
+              onValueChange={(value) =>
+                onChooseStrategy?.(value === WRITE_YOUR_OWN ? null : value)
+              }
+            >
+              <SelectTrigger
+                aria-label={`${label} strategy`}
+                className="select-trigger"
+              >
+                <SelectValue placeholder="Write your own strategy" />
+              </SelectTrigger>
+              <SelectContent className="max-h-[min(18rem,var(--radix-select-content-available-height))]">
+                <SelectItem
+                  value={WRITE_YOUR_OWN}
+                  className="cursor-pointer font-mono text-xs"
+                >
+                  Write your own
+                </SelectItem>
+                {library.map((entry) => (
+                  <SelectItem
+                    key={entry.id}
+                    value={entry.id}
+                    className="cursor-pointer font-mono text-xs"
+                  >
+                    {entry.one_line_description}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+
+          {chosen === null ? (
+            <textarea
+              value={seat.suggestions}
+              onChange={(event) => onSuggestionsChange(event.target.value)}
+              placeholder="Write the strategy this agent should follow..."
+              rows={3}
+              maxLength={2000}
+              aria-label={`${label} strategy`}
+              className="field-textarea"
+            />
+          ) : (
+            /*
+             * A saved entry runs as it is stored, so its text is shown rather
+             * than edited: changing it here would be a different strategy, and
+             * promoting an edited copy is not something this match can do.
+             */
+            <div className="agent-strategy-picked">
+              <span className="mono-label">
+                <Library className="mr-1 inline size-3" />
+                Saved strategy
+              </span>
+              <p>{chosen.strategy}</p>
+            </div>
+          )}
+        </div>
       )}
     </div>
   );

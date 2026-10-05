@@ -197,6 +197,36 @@ They configure:
 
 Do not duplicate the agent runtime in these packages.
 
+## The Strategy Reviewer
+
+`strategy_reviewer/` is the one agent here that does **not** play a match. It
+reads a finished one and writes a better strategy for one side.
+
+It is still a `ToolChoosingAgent`, so it inherits the same deferred-tool
+machinery, history repair and provider retry handling. What differs:
+
+- **A different toolset.** Its tools come from `agents/tools/review_tools/`, not
+  `build_default_registry()`. Those read through `app.reviewer`, and a review
+  registry exposes nothing that acts inside a sandbox. Never give this agent a
+  match tool.
+- **A bound match, not a chosen one.** The match id lives on the
+  `ReviewContext` handed to every tool; it is never a tool argument. The model
+  chooses which question to ask, never which match to ask about.
+- **Its own prompt.** `_turn_prompt()` is overridden, so it gets the challenge
+  framing and the strategy under review instead of a match objective and
+  scratchpad.
+- **A request limit.** `_request_limit` bounds its model requests. A match agent
+  is paced by the Engine's turn loop and the match clock; a one-shot agent has
+  nothing else bounding it, so it must set this.
+
+It is read-only in the strong sense: no Engine, no sandbox, no `SandboxManager`,
+and nothing it reads can be changed. Its output is a proposal, returned and
+never saved -- promoting it is a separate, deliberate
+`POST /strategies/save-strategy`.
+
+Do not let it become a match participant. A capability that would let it act in
+a match does not belong in `review_tools/`.
+
 ## No chain-of-thought
 
 Never ask the model to provide private reasoning as a `reason` field.

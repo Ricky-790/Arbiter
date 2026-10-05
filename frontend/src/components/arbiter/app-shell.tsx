@@ -8,7 +8,7 @@ const navItems = [
   { to: "/", label: "Home", index: "00" },
   { to: "/challenges", label: "Challenges", index: "01" },
   { to: "/matches", label: "Matches", index: "02" },
-  { to: "/forks", label: "Forks", index: "03" },
+  { to: "/archive", label: "Archive", index: "03" },
   { to: "/leaderboard", label: "Leaderboard", index: "04" },
 ] as const;
 

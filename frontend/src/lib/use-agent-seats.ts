@@ -30,6 +30,12 @@ export type AgentSeat = {
   /** Every model is BYOK, so a seated side always needs the caller's key. */
   needsKey: boolean;
   apiKey: string;
+  /**
+   * A saved strategy this side runs instead, or null when the operator is
+   * writing their own. The two are alternatives: a side runs either a library
+   * entry or the text below, never both.
+   */
+  strategyId: string | null;
   suggestions: string;
   /** Whether the provider confirmed this model name. */
   check: ModelCheck;
@@ -38,7 +44,7 @@ export type AgentSeat = {
 /** The mutable half of a seat; `needsKey`/`check` are derived, not stored. */
 type SeatState = Pick<
   AgentSeat,
-  "provider" | "model" | "apiKey" | "suggestions"
+  "provider" | "model" | "apiKey" | "strategyId" | "suggestions"
 >;
 
 export type SeatSide = "prisoner" | "warden";
@@ -54,6 +60,36 @@ export type SeatDefaults = {
   prisoner?: SeatDefault | null | undefined;
   warden?: SeatDefault | null | undefined;
 };
+
+/**
+ * Both sides' strategy choices, shaped for a start request.
+ *
+ * A side runs a saved strategy *or* the operator's own text, so this sends the
+ * id with null suggestions, or null id with the text. Sending both would leave
+ * the backend to decide which wins, which is not a decision the form should be
+ * making on the operator's behalf.
+ */
+export function seatStrategyPayloads(seats: Record<SeatSide, AgentSeat>): {
+  prisoner_strategy_id: string | null;
+  prisoner_suggestions: string | null;
+  warden_strategy_id: string | null;
+  warden_suggestions: string | null;
+} {
+  const side = (seat: AgentSeat) =>
+    seat.strategyId !== null
+      ? { id: seat.strategyId, suggestions: null }
+      : { id: null, suggestions: seat.suggestions.trim() || null };
+
+  const prisoner = side(seats.prisoner);
+  const warden = side(seats.warden);
+
+  return {
+    prisoner_strategy_id: prisoner.id,
+    prisoner_suggestions: prisoner.suggestions,
+    warden_strategy_id: warden.id,
+    warden_suggestions: warden.suggestions,
+  };
+}
 
 /** The suggested models `provider` offers, or `[]` if it is not in the catalogue. */
 export function modelsForProvider(
@@ -145,9 +181,10 @@ function useModelCheck(
  * The two seat assignments shared by the launch and start-from-fork pages.
  *
  * Both flows make the same choice under the same rules — a provider and a model
- * per side, no repeating the other side's exact pair, a key for each side, and
- * a model name the provider confirms — so the rules live here instead of in
- * each form.
+ * per side, no repeating the other side's exact pair, a key for each side, a
+ * model name the provider confirms, and a strategy that is either a saved library
+ * entry or the operator's own text but never both — so the rules live here instead
+ * of in each form.
  *
  * `defaults` pre-fills a side once the catalogue has loaded, and only if the
  * suggested pair is still offered; a side the caller has since chosen is never
@@ -205,8 +242,25 @@ export function useAgentSeats(
     update(side, (seat) => ({ ...seat, apiKey }));
   };
 
+  /**
+   * Run a saved strategy on this side, in place of anything typed.
+   *
+   * Choosing one clears the operator's own text: the backend treats a strategy
+   * id and free-text suggestions for the same side as alternatives, and running
+   * a stored wording alongside fresh tips would leave which one the agent sees
+   * down to the worker. Passing `null` is how the operator switches back to
+   * writing their own.
+   */
+  const chooseStrategy = (side: SeatSide, strategyId: string | null) => {
+    update(side, (seat) => ({ ...seat, strategyId, suggestions: "" }));
+  };
+
+  /**
+   * Edit the operator's own tips, which drops any chosen strategy for the same
+   * reason `chooseStrategy` clears the text. Typing at all means "mine".
+   */
   const setSuggestions = (side: SeatSide, suggestions: string) => {
-    update(side, (seat) => ({ ...seat, suggestions }));
+    update(side, (seat) => ({ ...seat, suggestions, strategyId: null }));
   };
 
   const prisonerCheck = useModelCheck(
@@ -255,6 +309,7 @@ export function useAgentSeats(
     chooseProvider,
     chooseModel,
     setApiKey,
+    chooseStrategy,
     setSuggestions,
   };
 }
@@ -269,5 +324,11 @@ function seated(seat: SeatState, check: ModelCheck): AgentSeat {
 }
 
 function emptySeat(): SeatState {
-  return { provider: "", model: "", apiKey: "", suggestions: "" };
+  return {
+    provider: "",
+    model: "",
+    apiKey: "",
+    strategyId: null,
+    suggestions: "",
+  };
 }

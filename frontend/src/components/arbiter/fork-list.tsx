@@ -3,7 +3,6 @@ import { useNavigate } from "@tanstack/react-router";
 import { ArrowUpRight, ChevronLeft, ChevronRight } from "lucide-react";
 import { useState } from "react";
 
-import { Eyebrow } from "@/components/arbiter/app-shell";
 import { listForks } from "@/lib/api";
 import type { ForkSchema } from "@/lib/dto";
 import { formatDateTime } from "@/lib/format";
@@ -12,7 +11,7 @@ import { isForkPending } from "@/lib/match-status";
 const PAGE_SIZE = 20;
 
 /**
- * Every saved fork point, newest first.
+ * Every saved fork point, newest first — the archive's second section.
  *
  * A fork is a checkpoint on a finished match, not a match of its own, so this
  * list is about where the work is: what point it was taken at, which match it
@@ -39,41 +38,33 @@ export function ForkList() {
   const pending = forks.filter((fork) => isForkPending(fork.status)).length;
 
   const openFork = (fork: ForkSchema) => {
-    navigate({ to: "/forks", search: { fork_id: fork.id } });
+    navigate({ to: "/archive", search: { fork_id: fork.id } });
   };
 
   return (
-    <main className="page-wrap page-pad">
-      <div className="page-intro">
-        <div>
-          <Eyebrow>Fork points / saved checkpoints</Eyebrow>
-          <h1 className="page-title">Positions worth re-running.</h1>
-          <p className="page-deck">
-            Each fork is a finished match captured at one moment: the sandbox as
-            it stood and what each agent already knew. Start a new match from
-            one and run the same position with different models.
-          </p>
-        </div>
-        <div className="page-meta">
-          <span>Forks saved</span>
-          <strong>{total.toString().padStart(2, "0")}</strong>
-          <span>{pending === 0 ? "All ready" : `${pending} rebuilding`}</span>
-        </div>
+    <section className="archive-section">
+      <div className="agent-heading">
+        <h2>Forks</h2>
+        <span className="mono-label">
+          {total === 0
+            ? "None saved yet"
+            : `${total} saved · ${pending === 0 ? "all ready" : `${pending} rebuilding`}`}
+        </span>
       </div>
 
       {forksQuery.isPending && (
-        <p className="loading-line">Loading saved forks...</p>
+        <p className="loading-line mt-6">Loading saved forks...</p>
       )}
 
       {forksQuery.isError && (
-        <p className="error-line">
+        <p className="error-line mt-6">
           Failed to load forks: {(forksQuery.error as Error).message}
         </p>
       )}
 
       {!forksQuery.isPending && !forksQuery.isError && (
         <>
-          <div className="fork-list mt-8">
+          <div className="fork-list mt-6">
             {forks.length === 0 ? (
               <p className="empty-state">
                 No fork points yet. Open a finished match and save one from any
@@ -113,35 +104,37 @@ export function ForkList() {
             )}
           </div>
 
-          <div className="pagination">
-            <button
-              type="button"
-              className="button-secondary"
-              onClick={() => setPage((current) => Math.max(1, current - 1))}
-              disabled={page <= 1}
-            >
-              <ChevronLeft className="size-3" />
-              Prev
-            </button>
-            <span className="pagination-count">
-              Page {pages === 0 ? 0 : page} / {pages}
-            </span>
-            <button
-              type="button"
-              className="button-secondary"
-              onClick={() => setPage((current) => current + 1)}
-              disabled={page >= pages}
-            >
-              Next
-              <ChevronRight className="size-3" />
-            </button>
-            <span className="pagination-count pagination-total">
-              {total} forks
-            </span>
-          </div>
+          {total > PAGE_SIZE && (
+            <div className="pagination">
+              <button
+                type="button"
+                className="button-secondary"
+                onClick={() => setPage((current) => Math.max(1, current - 1))}
+                disabled={page <= 1}
+              >
+                <ChevronLeft className="size-3" />
+                Prev
+              </button>
+              <span className="pagination-count">
+                Page {pages === 0 ? 0 : page} / {pages}
+              </span>
+              <button
+                type="button"
+                className="button-secondary"
+                onClick={() => setPage((current) => current + 1)}
+                disabled={page >= pages}
+              >
+                Next
+                <ChevronRight className="size-3" />
+              </button>
+              <span className="pagination-count pagination-total">
+                {total} forks
+              </span>
+            </div>
+          )}
         </>
       )}
-    </main>
+    </section>
   );
 }
 

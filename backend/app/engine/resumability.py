@@ -68,9 +68,7 @@ class ForkHistory(NamedTuple):
     warden_messages: list[dict[str, Any]] | None
 
 
-async def plan_fork_build(
-    match_id: UUID, branch_event_id: UUID
-) -> ForkBuildPlan:
+async def plan_fork_build(match_id: UUID, branch_event_id: UUID) -> ForkBuildPlan:
     """Decide what the fork worker has to replay to reach one branch point.
 
     ``match_id`` is the match being forked. The base is the newest *ready* fork
@@ -94,9 +92,7 @@ async def plan_fork_build(
             # replay there as well: a fork row recorded before snapping existed
             # would otherwise replay its own siblings a second time on top of a
             # snapshot that already contains them.
-            after = await snap_branch_event(
-                match_id, cached.branch_event_id, session
-            )
+            after = await snap_branch_event(match_id, cached.branch_event_id, session)
             after_event_id: UUID | None = after.id
         else:
             base_snapshot_id = await _origin_snapshot(match_id, session)
@@ -240,11 +236,7 @@ async def _origin_snapshot(match_id: UUID, session: AsyncSession) -> str | None:
     fork of *it* only has to replay this match's own calls on top.
     """
     match = await matches_service.get_match(match_id, session)
-    if (
-        match is None
-        or match.parent_match_id is None
-        or match.branch_event_id is None
-    ):
+    if match is None or match.parent_match_id is None or match.branch_event_id is None:
         return None
     origin = await match_forks_service.get_by_point(
         match.parent_match_id, match.branch_event_id, session

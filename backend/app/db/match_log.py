@@ -26,6 +26,9 @@ _MATCH_COLUMNS = (
     "duration_seconds",
     "started_at",
     "finished_at",
+    #: End-of-match per-side summary, written with the ``match_finished`` event.
+    "prisoner_stats",
+    "warden_stats",
 )
 
 

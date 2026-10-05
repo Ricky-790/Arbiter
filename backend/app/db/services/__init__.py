@@ -5,6 +5,7 @@ from .challenge_service import challenges_service
 from .match_event_service import match_events_service
 from .match_fork_service import match_forks_service
 from .match_service import matches_service
+from .strategy_service import strategies_service
 
 __all__ = [
     "challenges_service",
@@ -12,4 +13,5 @@ __all__ = [
     "match_events_service",
     "match_forks_service",
     "matches_service",
+    "strategies_service",
 ]

@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import DateTime, Float, ForeignKey, String, Text
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base
@@ -91,6 +91,44 @@ class Match(Base):
         default=lambda: datetime.now(timezone.utc),
         index=True,
     )
+
+    #: End-of-match summary per side, written once by the Engine as the match
+    #: closes. ``None`` until then, and for matches recorded before the column
+    #: existed. JSONB rather than columns because the reviewer is expected to
+    #: want more counters over time, and this is a snapshot, not a query key:
+    #:
+    #:     {"credits": int, "tool_calls": int}
+    #:
+    #: ``credits`` is what the side had left, ``tool_calls`` is how many actions
+    #: it requested (rejected calls included, matching the ``tool_call`` rows in
+    #: ``match_events``). Replayed calls from a fork rebuild are not counted.
+    prisoner_stats: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    warden_stats: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+    #: The strategy each side was started with, keyed by side:
+    #:
+    #:     {"prisoner": str, "warden": str}
+    #:
+    #: Written once when the match is queued, from the operator's tips or from
+    #: the library strategy a side was started from. The self-improvement loop
+    #: reads it back when it promotes a finished match's strategy into the
+    #: ``strategies`` table. ``NULL`` when neither side was given one, and a
+    #: side with no strategy is simply absent from the object.
+    strategy: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    #: The ``strategies.id`` each side ran, keyed by side:
+    #:
+    #:     {"prisoner": "<uuid>", "warden": "<uuid>"}
+    #:
+    #: Set at queue time when a side was started from a saved strategy, and
+    #: written back onto a match by ``save-strategy`` when one is promoted out
+    #: of it. Both directions land here so a saved strategy can be traced to
+    #: every match that ran it. The text alone cannot do that: it is copied onto
+    #: each match, so two matches sharing wording are not otherwise related.
+    #:
+    #: Held as strings because it lives inside JSONB, and keyed by side because
+    #: one match can carry a strategy for each. A side with no library strategy
+    #: is absent rather than null.
+    strategy_id: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     challenge: Mapped["Challenge"] = relationship(
         "Challenge", back_populates="matches", lazy="selectin"

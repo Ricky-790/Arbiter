@@ -10,7 +10,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from .routes import challenges, matches
+from .routes import challenges, matches, strategy_review
 
 load_dotenv()
 
@@ -74,3 +74,5 @@ app.add_middleware(
 )
 app.include_router(challenges.router)
 app.include_router(matches.router)
+app.include_router(strategy_review.strategies_router)
+app.include_router(strategy_review.reviewer_router)

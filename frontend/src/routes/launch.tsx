@@ -5,9 +5,18 @@ import { toast } from "sonner";
 
 import { AgentSeatPicker } from "@/components/arbiter/agent-seat-picker";
 import { Eyebrow } from "@/components/arbiter/app-shell";
-import { getChallenge, listModels, startMatch } from "@/lib/api";
-import type { AvailableModelsResponse } from "@/lib/dto";
-import { seatModelKey, useAgentSeats } from "@/lib/use-agent-seats";
+import {
+  getChallenge,
+  listModels,
+  listStrategies,
+  startMatch,
+} from "@/lib/api";
+import type { AvailableModelsResponse, StrategySchema } from "@/lib/dto";
+import {
+  seatModelKey,
+  seatStrategyPayloads,
+  useAgentSeats,
+} from "@/lib/use-agent-seats";
 
 export const Route = createFileRoute("/launch")({
   validateSearch: (
@@ -49,15 +58,30 @@ function LaunchPage() {
     enabled: challengeId !== "",
   });
 
+  // A strategy only means anything against the challenge it was played on, so
+  // this asks for that challenge's entries rather than the whole library.
+  const strategiesQuery = useQuery({
+    queryKey: ["strategies", "challenge", challengeId],
+    queryFn: () => listStrategies({ challengeId, limit: 50 }),
+    enabled: challengeId !== "",
+  });
+
   const models: AvailableModelsResponse = modelsQuery.data ?? {
     providers: [],
   };
+  // Each seat is only offered its own side's entries; the other side's wording
+  // is not something an agent should be handed.
+  const sideStrategies = splitBySide(strategiesQuery.data?.items ?? []);
+  const savedCount =
+    sideStrategies.prisoner.length + sideStrategies.warden.length;
+
   const {
     seats,
     ready,
     chooseProvider,
     chooseModel,
     setApiKey,
+    chooseStrategy,
     setSuggestions,
   } = useAgentSeats(models);
 
@@ -69,8 +93,7 @@ function LaunchPage() {
         prisoner_model: seats.prisoner.model,
         warden_provider: seats.warden.provider,
         warden_model: seats.warden.model,
-        prisoner_suggestions: seats.prisoner.suggestions.trim() || null,
-        warden_suggestions: seats.warden.suggestions.trim() || null,
+        ...seatStrategyPayloads(seats),
         prisoner_api_key: seats.prisoner.needsKey
           ? seats.prisoner.apiKey.trim()
           : null,
@@ -191,7 +214,10 @@ function LaunchPage() {
 
           <div className="agent-heading">
             <h2>Seat the agents</h2>
-            <span className="mono-label">Different model required</span>
+            <span className="mono-label">
+              Different model required · {savedHere(savedCount)}{" "}
+              {savedCount === 1 ? "strategy" : "strategies"} saved here
+            </span>
           </div>
           <div className="agent-grid">
             <AgentSeatPicker
@@ -200,6 +226,7 @@ function LaunchPage() {
               hint="Attacker"
               seat={seats.prisoner}
               models={models}
+              strategies={sideStrategies.prisoner}
               excluded={seatModelKey(seats.warden)}
               loading={modelsQuery.isPending}
               onChooseProvider={(provider) =>
@@ -207,6 +234,7 @@ function LaunchPage() {
               }
               onChooseModel={(model) => chooseModel("prisoner", model)}
               onApiKeyChange={(value) => setApiKey("prisoner", value)}
+              onChooseStrategy={(id) => chooseStrategy("prisoner", id)}
               onSuggestionsChange={(value) => setSuggestions("prisoner", value)}
             />
             <AgentSeatPicker
@@ -215,6 +243,7 @@ function LaunchPage() {
               hint="Defender"
               seat={seats.warden}
               models={models}
+              strategies={sideStrategies.warden}
               excluded={seatModelKey(seats.prisoner)}
               loading={modelsQuery.isPending}
               onChooseProvider={(provider) =>
@@ -222,9 +251,18 @@ function LaunchPage() {
               }
               onChooseModel={(model) => chooseModel("warden", model)}
               onApiKeyChange={(value) => setApiKey("warden", value)}
+              onChooseStrategy={(id) => chooseStrategy("warden", id)}
               onSuggestionsChange={(value) => setSuggestions("warden", value)}
             />
           </div>
+
+          {strategiesQuery.isError && (
+            <p className="launch-status error">
+              Failed to load strategies:{" "}
+              {(strategiesQuery.error as Error).message} — you can still write
+              your own.
+            </p>
+          )}
 
           {modelsQuery.isError && (
             <p className="launch-status error">
@@ -270,4 +308,26 @@ function LaunchPage() {
       </div>
     </main>
   );
+}
+
+/**
+ * Split a page of strategies by the side each one is for.
+ *
+ * The library stores the side on the entry, and an agent should only ever be
+ * handed its own side's wording, so the two lists are kept apart rather than
+ * filtered again at each picker.
+ */
+function splitBySide(strategies: StrategySchema[]): {
+  prisoner: StrategySchema[];
+  warden: StrategySchema[];
+} {
+  return {
+    prisoner: strategies.filter((entry) => entry.user === "prisoner"),
+    warden: strategies.filter((entry) => entry.user === "warden"),
+  };
+}
+
+/** How many strategies this challenge has saved, while that is still loading. */
+function savedHere(count: number): string {
+  return count === 0 ? "No" : String(count);
 }

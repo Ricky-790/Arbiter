@@ -190,6 +190,34 @@ def _spec(**overrides: object) -> ChallengeSpec:
     fields.update(overrides)
     return ChallengeSpec(**fields)  # type: ignore[arg-type]
 
+    def test_the_strategy_reaches_the_objective(self) -> None:
+        spec = _spec()
+
+        for objective in (
+            prisoner_objective(spec, "try the shard order"),
+            warden_objective(spec, "try the shard order"),
+        ):
+            with self.subTest(objective=objective):
+                self.assertIn("Try this strategy: try the shard order", objective)
+
+    def test_a_missing_strategy_says_so(self) -> None:
+        spec = _spec()
+
+        for objective in (prisoner_objective(spec, None), warden_objective(spec, None)):
+            with self.subTest(objective=objective):
+                self.assertIn("No strategy provided", objective)
+
+    def test_the_challenge_description_is_no_longer_sent(self) -> None:
+        """The per-role hint replaced it: the description was shared text."""
+        spec = _spec(prisoner_hint="p", warden_hint="w")
+
+        for objective in (
+            prisoner_objective(spec, None),
+            warden_objective(spec, None),
+        ):
+            with self.subTest(objective=objective):
+                self.assertNotIn(spec.description, objective)
+
 
 class ObjectiveHintTests(unittest.TestCase):
     """Each side's hint reaches that side's prompt and only that side's."""
@@ -198,14 +226,15 @@ class ObjectiveHintTests(unittest.TestCase):
         spec = _spec(prisoner_hint="Look at how the service is built.")
 
         self.assertIn(
-            "Briefing: Look at how the service is built.", prisoner_objective(spec)
+            "Briefing: Look at how the service is built.",
+            prisoner_objective(spec, None),
         )
 
     def test_the_warden_hint_reaches_the_warden_objective(self) -> None:
         spec = _spec(warden_hint="Guard /challenge/vault/artifact.")
 
         self.assertIn(
-            "Briefing: Guard /challenge/vault/artifact.", warden_objective(spec)
+            "Briefing: Guard /challenge/vault/artifact.", warden_objective(spec, None)
         )
 
     def test_hints_are_not_shared_between_the_sides(self) -> None:
@@ -215,7 +244,7 @@ class ObjectiveHintTests(unittest.TestCase):
             warden_hint="WARDEN-EYES-ONLY",
         )
 
-        prisoner, warden = prisoner_objective(spec), warden_objective(spec)
+        prisoner, warden = prisoner_objective(spec, None), warden_objective(spec, None)
 
         self.assertNotIn("WARDEN-EYES-ONLY", prisoner)
         self.assertNotIn("PRISONER-EYES-ONLY", warden)
@@ -223,25 +252,24 @@ class ObjectiveHintTests(unittest.TestCase):
     def test_a_missing_hint_adds_no_briefing_line(self) -> None:
         spec = _spec()
 
-        self.assertNotIn("Briefing:", prisoner_objective(spec))
-        self.assertNotIn("Briefing:", warden_objective(spec))
+        self.assertNotIn("Briefing:", prisoner_objective(spec, None))
+        self.assertNotIn("Briefing:", warden_objective(spec, None))
 
     def test_a_blank_hint_adds_no_briefing_line(self) -> None:
         spec = _spec(prisoner_hint="   \n  ", warden_hint="")
 
-        self.assertNotIn("Briefing:", prisoner_objective(spec))
-        self.assertNotIn("Briefing:", warden_objective(spec))
+        self.assertNotIn("Briefing:", prisoner_objective(spec, None))
+        self.assertNotIn("Briefing:", warden_objective(spec, None))
 
     def test_a_hint_is_trimmed(self) -> None:
         spec = _spec(warden_hint="  spaced out  ")
 
-        self.assertIn("Briefing: spaced out", warden_objective(spec))
-        self.assertNotIn("spaced out  ", warden_objective(spec))
+        self.assertIn("Briefing: spaced out", warden_objective(spec, None))
+        self.assertNotIn("spaced out  ", warden_objective(spec, None))
 
-    def test_both_objectives_still_carry_the_challenge_framing(self) -> None:
+    def test_both_objectives_still_name_the_challenge(self) -> None:
         spec = _spec(prisoner_hint="p", warden_hint="w")
 
-        for objective in (prisoner_objective(spec), warden_objective(spec)):
+        for objective in (prisoner_objective(spec, None), warden_objective(spec, None)):
             with self.subTest(objective=objective):
                 self.assertIn("Assemble the Artifact", objective)
-                self.assertIn(spec.description, objective)

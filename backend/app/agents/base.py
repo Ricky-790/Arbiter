@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import types
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterable
-from typing import Any, Union, get_args, get_origin
+from typing import Any, Union, get_args, get_origin, get_type_hints
 from uuid import uuid4
 
 from pydantic_ai import (
@@ -13,6 +14,7 @@ from pydantic_ai import (
     DeferredToolResults,
     RunContext,
     ToolDefinition,
+    UsageLimits,
 )
 from pydantic_ai.capabilities import HandleDeferredToolCalls
 from pydantic_ai.exceptions import ModelHTTPError
@@ -103,15 +105,27 @@ def dump_agent_history(agent: Any) -> list[dict[str, Any]] | None:
 
 
 def _function_signature_to_json_schema(tool: Any) -> dict[str, Any]:
-    """Build a minimal JSON schema for a BaseTool's execute() method."""
+    """Build a minimal JSON schema for a BaseTool's execute() method.
+
+    Annotations are resolved with ``get_type_hints`` rather than read off
+    ``inspect.Parameter.annotation``, because a module using ``from __future__
+    import annotations`` -- the house style -- leaves every annotation a
+    *string*. Reading them raw makes every argument look like an object, so the
+    model is told ``bash(command=...)`` takes an object and cannot call it
+    correctly. Resolving also keeps ``str | None`` working.
+    """
     sig = inspect.signature(tool.execute)
+    try:
+        hints = get_type_hints(tool.execute)
+    except Exception:  # unresolvable forward reference; fall back to raw
+        hints = {}
     properties: dict[str, Any] = {}
     required: list[str] = []
     for name, param in sig.parameters.items():
         if name in {"self", "context"}:
             continue
         schema: dict[str, Any] = {}
-        annotation = param.annotation
+        annotation = hints.get(name, param.annotation)
         if annotation is not inspect.Parameter.empty:
             if annotation is str:
                 schema["type"] = "string"
@@ -123,22 +137,20 @@ def _function_signature_to_json_schema(tool: Any) -> dict[str, Any]:
                 schema["type"] = "number"
             else:
                 origin = get_origin(annotation)
-                if origin is Union or (
-                    hasattr(origin, "__origin__") and origin.__origin__ is Union
-                ):  # type: ignore[attr-defined]
+                if origin is Union or origin is types.UnionType:
                     members = [m for m in get_args(annotation) if m is not type(None)]
-                    types: list[str] = []
+                    types_found: list[str] = []
                     for m in members:
                         if m is str:
-                            types.append("string")
+                            types_found.append("string")
                         elif m is int:
-                            types.append("integer")
+                            types_found.append("integer")
                         else:
-                            types.append("object")
-                    if len(types) == 1:
-                        schema["type"] = types[0]
+                            types_found.append("object")
+                    if len(types_found) == 1:
+                        schema["type"] = types_found[0]
                     else:
-                        schema["type"] = types
+                        schema["type"] = types_found
                     if type(None) in get_args(annotation):
                         schema["nullable"] = True
                 elif origin is dict:
@@ -316,6 +328,25 @@ class ToolChoosingAgent:
             self._enqueued_messages.clear()
         return requests.build_results(calls=calls)
 
+    #: Hard cap on model requests within one turn. ``None`` defers to the
+    #: provider. Match agents are paced by the Engine's turn loop and their
+    #: own wall clock; a one-shot agent -- the reviewer -- has nothing else
+    #: bounding it, so it sets this rather than looping until it runs out of
+    #: context or budget.
+    _request_limit: int | None = None
+
+    def _turn_prompt(self, scratchpad: str) -> str:
+        """The user prompt for one turn of a match-playing agent.
+
+        Overridden by agents that are not playing a match and so have no
+        objective or scratchpad to work toward.
+        """
+        prompt = "Work toward your objective. Call tools as needed, then reply with a brief status."
+        if self.objective:
+            prompt += f"\nCurrent match objective: {self.objective}"
+        prompt += f"\nYour scratchpad:\n<scratchpad>{scratchpad}</scratchpad>"
+        return prompt
+
     async def run_turn(self, scratchpad: str = "") -> str | None:
         """Run one native agent turn, resolving tools inline via the handler.
 
@@ -340,16 +371,20 @@ class ToolChoosingAgent:
         if self._scripted_mode:
             return None
 
-        prompt = "Work toward your objective. Call tools as needed, then reply with a brief status."
-        if self.objective:
-            prompt += f"\nCurrent match objective: {self.objective}"
-        prompt += f"\nYour scratchpad:\n<scratchpad>{scratchpad}</scratchpad>"
+        prompt = self._turn_prompt(scratchpad)
         max_attempts = 3
         last_status: int | None = None
         history = self._usable_history()
+        # Only sent when a limit is set, so an agent that does not opt in calls
+        # the model exactly as it did before.
+        run_kwargs: dict[str, Any] = {"message_history": history}
+        if self._request_limit is not None:
+            run_kwargs["usage_limits"] = UsageLimits(
+                request_limit=self._request_limit
+            )
         for attempt in range(1, max_attempts + 1):
             try:
-                result = await self._agent.run(prompt, message_history=history)
+                result = await self._agent.run(prompt, **run_kwargs)
                 self._message_history = result.all_messages()
             except ModelHTTPError as e:
                 status = e.status_code

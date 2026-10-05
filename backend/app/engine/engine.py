@@ -58,6 +58,28 @@ PRIVATE_PRISONER_TOOLS = frozenset(
 #: large (a write_file body, for example), so a line is bounded.
 PRISONER_LOG_LINE_LIMIT = 300
 
+#: How long one tool call may run before the Engine abandons it.
+#:
+#: Neither sandbox provider bounds a single command -- E2B runs with
+#: ``timeout=0`` and Solari exposes no per-command timeout -- so without this a
+#: command that never returns hangs until the match wall clock, which is
+#: unconditionally a Warden win. A shell command can do this without intending
+#: to: backgrounding a process with ``&`` but without redirecting its output
+#: leaves the child holding the stdout pipe open, so the runner never sees EOF
+#: and the call never completes.
+#:
+#: This is deliberately far above any legitimate command (a whole match is
+#: 600s) and applies to every tool, not just ``bash``. Traps are unaffected:
+#: arming one returns immediately and the monitoring runs in a separate task.
+TOOL_TIMEOUT_SECONDS = 45.0
+
+#: Where setup installs the Warden's passwordless sudo rule.
+#:
+#: Prefixed so it cannot collide with a sudoers file a challenge ships itself.
+#: The rule is what actually gives the Warden root; ``usermod -aG sudo`` alone
+#: does not, because the created account has no password to authenticate with.
+WARDEN_SUDOERS_PATH = "/etc/sudoers.d/arbiter-warden"
+
 
 def format_tool_call(call: ToolCall, value_limit: int = 200) -> str:
     """Render one tool call as a short single line, e.g. ``bash(ls -la .)``.
@@ -220,6 +242,7 @@ class Engine:
         sandbox_manager: SandboxManager,
         registry: ToolRegistry | None = None,
         cooldown_seconds: float = 5.0,
+        tool_timeout_seconds: float = TOOL_TIMEOUT_SECONDS,
         event_sink: Callable[[dict[str, Any]], None] | None = None,
         match_metadata: dict[str, Any] | None = None,
     ) -> None:
@@ -228,6 +251,7 @@ class Engine:
         self.registry = registry or build_default_registry()
         self.credits = CreditManager()
         self.cooldowns = CooldownManager(timedelta(seconds=cooldown_seconds))
+        self.tool_timeout_seconds = tool_timeout_seconds
         self.traps = TrapManager()
         self.event_sink = event_sink
         self.match_metadata = match_metadata
@@ -334,18 +358,25 @@ class Engine:
         match did without spending real time. While replay mode is on nothing
         is persisted, streamed to spectators, or traced -- the sandbox and the
         Warden-visible prisoner log are what a replay rebuilds.
+
+        The whole action is bounded by ``tool_timeout_seconds``: the tool
+        itself and, for the Prisoner, the activity-log write that precedes it.
+        A call that outruns the budget is abandoned and reported as a failed
+        result rather than hanging. That matters beyond the one call -- the
+        action lock is match-wide, so without a budget a single unresponsive
+        command freezes the *opponent* too until the match wall clock, which is
+        always a Warden win. Traps are unaffected: arming one returns
+        immediately and the monitoring runs in a separate task.
         """
         if replay_at is not None:
             # Anchor rule code that reads "now" (trap reaction windows) to the
             # instant being replayed rather than the wall clock.
             self._replay_now = replay_at
-        # Mirror the request into the Warden-visible log before it runs: the
-        # Warden learns what the Prisoner attempted, never whether it worked.
-        # Deliberately not gated by replay mode: rebuilding this log is part
-        # of restoring the sandbox.
-        if actor is AgentType.PRISONER and call.name not in PRIVATE_PRISONER_TOOLS:
-            await self._log_prisoner_tool_call(call)
-
+        if not self._replay_mode:
+            # Counted here rather than where the result is persisted so a call
+            # that crashes mid-execution is still counted, exactly as its
+            # ``tool_call`` row is written by the handler below.
+            self._agent_state(actor).tool_calls += 1
         action: dict[str, Any] = {
             "tool": call.name,
             "arguments": call.arguments,
@@ -361,6 +392,25 @@ class Engine:
             async with (
                 self._action_lock  # Makes sure only one async task can access a shared resource
             ):
+                # Mirror the request into the Warden-visible log before it
+                # runs: the Warden learns what the Prisoner attempted, never
+                # whether it worked. Deliberately not gated by replay mode:
+                # rebuilding this log is part of restoring the sandbox. It is
+                # bounded because it is itself a sandbox command -- an
+                # unresponsive write would otherwise wedge the Prisoner before
+                # its own call reached the timeout below.
+                if (
+                    actor is AgentType.PRISONER
+                    and call.name not in PRIVATE_PRISONER_TOOLS
+                ):
+                    try:
+                        async with asyncio.timeout(self.tool_timeout_seconds):
+                            await self._log_prisoner_tool_call(call)
+                    except TimeoutError:
+                        logger.warning(
+                            f"[{actor.value}] prisoner activity log write timed "
+                            "out; the log is best-effort so the call continues"
+                        )
                 span_context = (
                     nullcontext(None)
                     if self._replay_mode
@@ -482,7 +532,21 @@ class Engine:
             self.cooldowns.start(self.state, actor, now=replay_at)
         context = EngineExecutionContext(self, actor)
         try:
-            result = await tool.execute(context, **call.arguments)
+            async with asyncio.timeout(self.tool_timeout_seconds):
+                result = await tool.execute(context, **call.arguments)
+        except TimeoutError:
+            # The call is abandoned, not the match. Returning a result rather
+            # than raising keeps the game going and lets the agent see what
+            # happened and try something else -- and, crucially, it releases
+            # the action lock, which is match-wide: without this a single hung
+            # call freezes the *opponent* too until the match wall clock.
+            # Whatever the command started may still be running in the sandbox,
+            # so the message says so rather than implying it was undone.
+            logger.warning(
+                f"[{actor.value}] tool {call.name} did not return within "
+                f"{self.tool_timeout_seconds:g}s; abandoning the call"
+            )
+            result = self._timed_out(call)
         except Exception:
             if span is not None:
                 set_span_attributes(
@@ -500,7 +564,11 @@ class Engine:
             set_span_attributes(
                 span,
                 {
-                    "arbiter.status": "executed",
+                    "arbiter.status": (
+                        "timed_out"
+                        if result.metadata.get("failure_category") == "timeout"
+                        else "executed"
+                    ),
                     "arbiter.success": result.success,
                     "arbiter.exit_code": result.exit_code,
                     "arbiter.credits_charged": tool.cost.value,
@@ -521,9 +589,34 @@ class Engine:
         if actor is AgentType.WARDEN and result.success:
             if call.name in TRAP_TOOL_NAMES:
                 self.traps.arm(self.state, call)
+                self.state.warden.traps_armed += 1
             elif self.state.blocked_trap_name is not None:
                 self.state.blocked_trap_name = None
         return result
+
+    def _timed_out(self, call: ToolCall) -> ToolResult:
+        """The result an agent gets when its tool call is abandoned.
+
+        Written to be read by the agent and acted on: it says what happened,
+        that the match is still running, and that whatever the command started
+        may still be alive -- so repeating the call unchanged times out the
+        same way. The call is abandoned, never undone, so it says that too
+        rather than implying the sandbox was rolled back.
+        """
+        return ToolResult(
+            success=False,
+            error=(
+                f"{call.name} did not return within "
+                f"{self.tool_timeout_seconds:g} seconds and was abandoned. The "
+                "match is still running and it is your turn again. The command "
+                "produced no output, and anything it started may still be "
+                "running in the background. Do not repeat it unchanged: a "
+                "command that blocks, or that leaves a background process "
+                "holding its output open, will time out the same way. Try a "
+                "different approach."
+            ),
+            metadata={"failure_category": "timeout"},
+        )
 
     async def handle_sandbox_event(self, event: SandboxEvent) -> bool:
         """Persist one sandbox observation and react to it if a trap matches"""
@@ -553,17 +646,31 @@ class Engine:
             recorded = self._record(
                 "trap_triggered",
                 trap=trap.tool_name if trap else None,
+                target=trap.target if trap else None,
+                prisoner_turn=self.state.prisoner.turns,
                 reaction_until=reaction_until.isoformat(),
             )
             if not self._replay_mode:
+                # A firing is what the match is judged on, so both sides count
+                # it: the Prisoner was caught, the Warden's trap did the work.
+                self.state.prisoner.times_trapped += 1
+                self.state.warden.traps_triggered += 1
                 record_match_event(
                     "trap_triggered",
                     match_id=self.state.match_id,
                     trap=trap.tool_name if trap else None,
+                    target=trap.target if trap else None,
                 )
             await self._persist(
                 "trap_triggered",
-                result={"trap": trap.tool_name if trap else None},
+                result={
+                    "trap": trap.tool_name if trap else None,
+                    # The target is what tells two firings of the same trap tool
+                    # apart, and the turn says where in the match it happened.
+                    "target": trap.target if trap else None,
+                    "prisoner_turn": self.state.prisoner.turns,
+                    "warden_turn": self.state.warden.turns,
+                },
                 timestamp=recorded["timestamp"],
             )
             return True
@@ -779,6 +886,7 @@ class Engine:
                 await asyncio.sleep(0.05)
                 continue
             scratchpad = await self._read_scratchpad(actor)
+            self._agent_state(actor).turns += 1
             try:
                 # Agent identity for observability: covers the LLM call, the
                 # deferred tool calls inside it, and the next model request.
@@ -849,10 +957,29 @@ class Engine:
         challenge = self.state.challenge
         warden = shlex.quote(challenge.warden_user)
         prisoner = shlex.quote(challenge.prisoner_user)
+        warden_rule = shlex.quote(
+            f"{challenge.warden_user} ALL=(ALL) NOPASSWD:ALL"
+        )
         commands = [
             f"id -u {warden} >/dev/null 2>&1 || useradd -m -s /bin/bash {warden}",
             f"usermod -aG sudo {warden}",
             f"id -u {prisoner} >/dev/null 2>&1 || useradd -m -s /bin/bash {prisoner}",
+            # Lock root's password before either agent runs. The images ship
+            # root with an *empty* password field, and PAM's ``nullok`` lets
+            # ``su root`` accept it -- so without this both agents can become
+            # root with no password at all, which makes every other permission
+            # in the sandbox, and the whole Prisoner/Warden split, meaningless.
+            "passwd -l root",
+            # Then give the Warden the passwordless sudo its instructions
+            # already promise: group membership alone is not enough, because
+            # the account has no password to authenticate with. ``visudo -cf``
+            # validates before sudo reads it, so a malformed rule fails setup
+            # instead of breaking sudo for the rest of the match.
+            (
+                f"printf '%s\\n' {warden_rule} > {WARDEN_SUDOERS_PATH} && "
+                f"chmod 440 {WARDEN_SUDOERS_PATH} && "
+                f"visudo -cf {WARDEN_SUDOERS_PATH}"
+            ),
         ]
         for path, content in challenge.files.items():
             parent = shlex.quote(str(Path(path).parent))
@@ -1006,8 +1133,27 @@ class Engine:
                 duration_seconds=duration_seconds,
                 started_at=started_at,
                 finished_at=finished_at,
+                prisoner_stats=self._side_stats(AgentType.PRISONER),
+                warden_stats=self._side_stats(AgentType.WARDEN),
             ),
         )
+
+    def _side_stats(self, actor: AgentType) -> dict[str, int]:
+        """The end-of-match summary the reviewer reads for one side.
+
+        Each side carries only what it is judged on: the Prisoner is measured by
+        how often it was caught, the Warden by the traps it set and landed. A
+        counter the other side owns never appears here, so the summary cannot be
+        misread as "the Prisoner armed 0 traps".
+        """
+        state = self._agent_state(actor)
+        stats = {"credits": state.credits, "tool_calls": state.tool_calls}
+        if actor is AgentType.WARDEN:
+            stats["traps_armed"] = state.traps_armed
+            stats["traps_triggered"] = state.traps_triggered
+        else:
+            stats["times_trapped"] = state.times_trapped
+        return stats
 
     def _emit(self, event: dict[str, Any]) -> None:
         """Hand one event to the optional live sink.

@@ -3,4 +3,4 @@
 __pycache__/
 .logfire/
 .pytest_cache/
-
+.ruff_cache

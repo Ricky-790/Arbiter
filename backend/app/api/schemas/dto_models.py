@@ -8,10 +8,16 @@ ORM objects via ``Model.model_validate(...)`` and used as FastAPI
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
+
+from app.reviewer.models import AgentBriefing, MatchOverview, Page, SideStats
+
+#: The two sides of a match, as the API names them. Used wherever a request
+#: or response is scoped to one side.
+MatchSide = Literal["prisoner", "warden"]
 
 
 class PaginationMeta(BaseModel):
@@ -123,6 +129,11 @@ class StartMatchRequest(BaseModel):
     #: Optional free-text tips appended to each agent's role instructions.
     prisoner_suggestions: str | None = None
     warden_suggestions: str | None = None
+    #: Optional strategy ids from the library. A side given one is started with
+    #: that strategy instead of its suggestions, and the strategy is copied onto
+    #: the new match so it can be promoted again later.
+    prisoner_strategy_id: UUID | None = None
+    warden_strategy_id: UUID | None = None
     #: Provider keys, one per side. Every model is BYOK, so both are required.
     #: Sent in the body, never stored on the match row, never logged, and never
     #: echoed back. They are held encrypted for the match only and handed to the
@@ -209,6 +220,8 @@ class StartForkMatchRequest(BaseModel):
     warden_model: str
     prisoner_suggestions: str | None = None
     warden_suggestions: str | None = None
+    prisoner_strategy_id: UUID | None = None
+    warden_strategy_id: UUID | None = None
     prisoner_api_key: SecretStr | None = None
     warden_api_key: SecretStr | None = None
 
@@ -258,3 +271,124 @@ class ModelCheckResponse(BaseModel):
     exists: bool
     reason: str | None = None
     detail: str | None = None
+
+
+class SaveStrategyRequest(BaseModel):
+    """Request body for ``POST /api/v1/strategies/save-strategy``.
+
+    Promotes one side's strategy out of a match into the library. The strategy
+    text is not sent: it is read off the match row, so what is saved is exactly
+    what the match ran.
+    """
+
+    match_id: UUID
+    user: MatchSide
+
+
+class StrategySchema(BaseModel):
+    """One saved strategy, promoted from one side of one match.
+
+    ``origin_strat_id`` is the strategy this one evolved from, when the match
+    was itself started from a library strategy.
+
+    ``challenge_name`` is joined in for display, because a strategy is only
+    meaningful against the challenge it was played on and an id alone does not
+    say which one that is.
+    """
+
+    id: UUID
+    match_id: UUID
+    challenge_id: UUID
+    challenge_name: str | None = None
+    user: str
+    one_line_description: str
+    strategy: str
+    origin_strat_id: UUID | None = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class StrategyMatchSummary(BaseModel):
+    """The few facts about a match that a strategy's lineage needs.
+
+    Deliberately not the whole match: a strategy can be used many times, and a
+    lineage view wants to list them, not carry each one's history. A model pair,
+    the challenge it was played on, and who won is enough to tell the runs apart
+    and to see which wording is actually winning.
+    """
+
+    match_id: UUID
+    challenge_name: str | None = None
+    prisoner_model: str
+    warden_model: str
+    winner: str | None = None
+
+
+class StrategyDetailResponse(BaseModel):
+    """One saved strategy, the match it came from, and where it has been used.
+
+    ``parent_match`` is the match the strategy was promoted *from*, so its
+    wording can be read in context. ``used_in_matches`` is a page of the matches
+    that were started from it, newest first -- the parent is not among them.
+
+    ``used_in_matches`` is paged like every other listing: a strategy can be
+    reused indefinitely, and this endpoint would otherwise grow without bound.
+    """
+
+    strategy: StrategySchema
+    parent_match: StrategyMatchSummary | None = None
+    used_in_matches: Page[StrategyMatchSummary]
+
+
+class ReviewStrategyRequest(BaseModel):
+    """Request body for ``POST /api/v1/strategies/review``.
+
+    Names the strategy to improve and the match to review it against, plus the
+    model and key that will do the reviewing. The reviewer is BYOK like every
+    other model here, and the key travels in the body rather than the query
+    string so it cannot reach a URL, a log, or browser history.
+
+    The result is streamed and never stored: the caller decides what to do with
+    the proposed strategy.
+    """
+
+    strategy_id: UUID
+    match_id: UUID
+    provider: str
+    model: str
+    api_key: SecretStr | None = None
+
+
+class MatchSummaryResponse(BaseModel):
+    """One call's worth of the *small* things a reviewer needs about one side.
+
+    Everything here is per-match and bounded: the match row, one side's totals,
+    its strategy, and its opening message. Nothing that grows with the length of
+    the match is included -- conversations, tool calls, narration, trap firings
+    and raw events each have their own paginated endpoint -- so a dashboard can
+    render its summary without pulling a whole match into memory, and a reviewer
+    agent can ask for only the detail it needs.
+
+    ``user`` is the side this entry is about, and everything here is that side's:
+    there is deliberately no opponent block. When a caller wants both sides,
+    ``/summary`` returns one entry per side, so the comparison is two entries of
+    the same shape rather than two differently-scoped fields on one object.
+    ``match`` is the shared match row, carrying the full ``strategy`` map for
+    context.
+    """
+
+    match: MatchOverview
+    user: MatchSide
+    #: This side's spend and activity.
+    stats: SideStats
+    #: This side's strategy, exactly as the match ran it. ``None`` when it was
+    #: started without one. A convenience view of ``match.strategy[user]``,
+    #: which holds both sides.
+    strategy: str | None = None
+    #: Which trap tool fired, and how often. Shared, not per-side: a firing is
+    #: one event that both sides appear in.
+    triggered_trap_tools: dict[str, int] = Field(default_factory=dict)
+    #: The opening message that side was given, when its conversation is stored.
+    #: Carries the challenge's role hint as well as the strategy.
+    briefing: AgentBriefing | None = None

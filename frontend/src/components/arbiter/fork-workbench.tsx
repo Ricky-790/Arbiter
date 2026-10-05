@@ -11,7 +11,11 @@ import { getChallenge, getFork, listModels, startFromFork } from "@/lib/api";
 import type { AvailableModelsResponse } from "@/lib/dto";
 import { formatDateTime, formatModel } from "@/lib/format";
 import { isForkPending, isForkReady } from "@/lib/match-status";
-import { seatModelKey, useAgentSeats } from "@/lib/use-agent-seats";
+import {
+  seatModelKey,
+  seatStrategyPayloads,
+  useAgentSeats,
+} from "@/lib/use-agent-seats";
 
 const NO_MODELS: AvailableModelsResponse = { providers: [] };
 
@@ -86,8 +90,7 @@ export function ForkWorkbench({ forkId }: { forkId: string }) {
         prisoner_model: seats.prisoner.model,
         warden_provider: seats.warden.provider,
         warden_model: seats.warden.model,
-        prisoner_suggestions: seats.prisoner.suggestions.trim() || null,
-        warden_suggestions: seats.warden.suggestions.trim() || null,
+        ...seatStrategyPayloads(seats),
         prisoner_api_key: seats.prisoner.needsKey
           ? seats.prisoner.apiKey.trim()
           : null,
@@ -135,9 +138,9 @@ export function ForkWorkbench({ forkId }: { forkId: string }) {
               ? forkQuery.error.message
               : "This fork could not be found."}
           </p>
-          <Link to="/forks" className="button-secondary mt-6">
+          <Link to="/archive" className="button-secondary mt-6">
             <ArrowLeft className="size-3.5" />
-            Back to forks
+            Back to the archive
           </Link>
         </div>
       </main>
@@ -317,8 +320,8 @@ export function ForkWorkbench({ forkId }: { forkId: string }) {
                     : "Start match from fork"}
                   <ArrowUpRight className="size-3.5" />
                 </button>
-                <Link to="/forks" className="button-secondary">
-                  Back to forks
+                <Link to="/archive" className="button-secondary">
+                  Back to the archive
                 </Link>
               </div>
             </>

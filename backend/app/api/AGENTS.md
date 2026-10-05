@@ -47,4 +47,120 @@ them — so this endpoint exists to do it server-side.
 Store the keys before enqueueing, so a misconfigured store fails the request
 instead of leaving a match that can never build its agents.
 
+## Strategies
+
+`POST /strategies/save-strategy` takes `match_id` and `user`
+(`prisoner`/`warden`) and promotes that side's strategy out of the match into
+the `strategies` library, then writes the new row's id back onto the match.
+
+- The strategy text is read from `matches.strategy[user]`, never from the
+  request, so what was saved is exactly what the match ran.
+- `(match_id, user)` is unique: a repeat call returns the existing row and
+  inserts nothing. The link back onto the match is still written, so asking
+  again repairs a match whose `strategy_id` is missing.
+- A match with no strategy for that side is a 400, not an empty row.
+
+`start-match` and `start-from-fork` accept `prisoner_strategy_id` /
+`warden_strategy_id` alongside the free-text suggestions. Resolution
+(`_resolve_strategies`) runs **before** any key is stored or queued, so an
+unusable id fails the request without leaving a match behind:
+
+- a referenced strategy must exist (404) and belong to the match's challenge
+  (400) — a strategy is only meaningful against the challenge it was played on
+- an explicit id wins over suggestions sent for the same side
+- the resolved text is both sent to the worker as that side's suggestions and
+  written to `matches.strategy`, so the text that runs and the text that can
+  later be promoted are the same string
+
+Do not resolve strategy ids concurrently on one `AsyncSession` — it is not
+concurrency-safe. Both ids are read in a single query.
+
+`GET /strategies/all` lists the library, newest first, paged like every other
+listing, and takes an optional `challenge_id` to narrow it to one challenge —
+the usual question, since a strategy only means anything against the challenge
+it was played on. An id that matches nothing is an empty page, not an error.
+Each row carries `challenge_name` alongside `challenge_id`, joined in: the ORM
+row has only the id, and the name is what makes the list readable.
+
+That name is fetched by an explicit join, **not** through a
+`Strategy.challenge` relationship. `Challenge.matches` is `lazy="selectin"`, and
+eager loaders chain, so a relationship would make listing the library load every
+match of every challenge it touched. The join keeps the whole endpoint to two
+queries whatever the data looks like.
+
+`GET /strategies?strategy_id=...` returns one strategy with its **lineage**: the
+match it was promoted from, and a page of the matches started from it.
+
+The lineage reads `matches.strategy_id`, which is written from both ends of a
+strategy's life — at queue time for a side the start request named a strategy
+for, and at promotion for the match a strategy came out of. Recording the id at
+*start* is what makes "which matches used this" answerable at all; without it
+the only match a strategy could be traced to is the one it came from. The
+promoted-from match is excluded from the usage list, because it ran the wording
+before the strategy existed and is the origin rather than a use.
+
+Each match in the lineage carries only its models, challenge name and winner —
+enough to tell runs apart without dragging a match's history into a list that
+can be arbitrarily long.
+
+`POST /strategies/review` runs the Strategy Reviewer over one match to propose a
+better version of one saved strategy. It takes `strategy_id` and `match_id`,
+plus `provider`/`model`/`api_key`: the reviewer is BYOK like every other model,
+and the key goes in the body so it cannot reach a URL, a log or browser history.
+
+- Everything is validated **before** the stream opens — unknown provider, a
+  missing key, a model the provider does not serve, an unknown strategy or
+  match, and a strategy that was played on a different challenge. A failure is
+  then a plain 400/404 rather than an error frame halfway through a review.
+- The response is `text/event-stream`: `review_started`, then a
+  `review_tool_call`/`review_tool_result` pair per read the agent makes, then
+  exactly one `review_finished` (carrying the strategy) or `review_error`.
+- What streams is what the review *does*. It is never the model's private
+  reasoning — see `agents/AGENTS.md`, which forbids capturing it.
+- **Nothing is saved.** The strategy is returned as a proposal; promoting it is
+  the separate, deliberate `POST /strategies/save-strategy`.
+
+## Review endpoints
+
+`app/api/routes/strategy_review.py` exposes `app/reviewer` over HTTP under
+`/api/v1/reviewer`. These routes are pure adapters: the reviewer owns what may
+be seen, how it is shaped and how it is paged, and the routes only parse the
+query, map a missing match to 404, and compose the one summary that spans
+several reads. Adding a review question means adding a reviewer function, never
+a new filter here.
+
+The split is by size, not by table. `/summary` carries everything bounded by the
+match — the match row (challenge, strategy, outcome), both sides' totals, the
+requested side's strategy and opening message. Everything that grows with the
+*length* of a match is its own listing: `/conversation`, `/tool-calls`,
+`/thoughts`, `/traps`, `/events`. No single call can pull a whole match.
+
+`/summary` always answers with a **list**, one entry per side summarised, so its
+shape never depends on the request:
+
+- `user=prisoner` or `user=warden` returns exactly one entry.
+- Omitting `user` returns both, Prisoner first. Every entry is scoped entirely
+  to its own side — `stats`, `strategy`, `briefing` — with no opponent block, so
+  comparing the sides is reading two entries of the same shape rather than
+  one object with a requested/opponent split. `match` is the shared match row,
+  and its `strategy` map carries both sides' text for context. One call answers
+  the whole comparison, instead of two reads that could straddle a match still
+  being written.
+
+Rules for these routes:
+
+- `match_id` and `user` (`prisoner`/`warden`) come from `MatchSide`; an unknown
+  side is a 422 before the route body runs. `user` is optional on `/summary`
+  only — every other route is scoped to one side and still requires it.
+- Listings share one `offset`/`limit` pair, capped at the reviewer's own
+  `MAX_LIMIT`, and answer with the reviewer's `Page` shape
+  (`items`/`total`/`offset`/`limit`/`has_more`). The page vocabulary is
+  deliberately the reviewer's, not `PaginationMeta`, so the HTTP answer and an
+  agent tool result are the same object.
+- A listing 404s on an unknown match rather than returning an empty page, so a
+  reviewer can tell "this match did nothing" from "there is no such match".
+- `event_type` on `/events` is checked against `EVENT_TYPES` and rejected with
+  400, so a typo cannot read as "no events".
+- These routes write nothing and take no caller-supplied SQL.
+
 Future endpoints may cover challenge discovery, match creation, match status, live events, and historical results.

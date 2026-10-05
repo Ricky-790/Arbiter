@@ -30,6 +30,24 @@ class AgentState(BaseModel):
     cooldown_until: datetime | None = None
     reaction_until: datetime | None = None
     last_result: ToolResult | None = None
+    #: Actions this side requested. Counted on every call that reaches the
+    #: Engine, rejected ones included, so it matches the ``tool_call`` rows in
+    #: ``match_events``. Replayed calls from a fork rebuild are not counted --
+    #: they are history being restored, not new actions.
+    tool_calls: int = 0
+    #: Completed model cycles for this side: one per ``run_turn``. Recorded on a
+    #: trap firing so the reviewer can say which turn it happened on. A trap
+    #: fires from a sandbox observation rather than from a tool call, so this is
+    #: the turn that was in progress, not the action that caused it.
+    turns: int = 0
+    #: Warden: traps it armed. Only successful armings count -- a call the Engine
+    #: rejected left no trap behind.
+    traps_armed: int = 0
+    #: Warden: traps of its own that fired on the Prisoner.
+    traps_triggered: int = 0
+    #: Prisoner: how many times a trap caught it. The same firing increments the
+    #: Warden's ``traps_triggered``; each side keeps the count it is judged on.
+    times_trapped: int = 0
 
 
 class ActiveTrap(BaseModel):

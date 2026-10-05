@@ -40,10 +40,7 @@ def validate_submission(
     if not structure:
         return None
     if not isinstance(submission, dict):
-        return (
-            "submission must be a JSON object with keys "
-            f"{sorted(structure)}"
-        )
+        return f"submission must be a JSON object with keys {sorted(structure)}"
 
     missing = sorted(key for key in structure if key not in submission)
     if missing:
@@ -115,6 +112,4 @@ def parse_verifier_verdict(
             return False, detail
         return False, f"verifier script produced no output (exit code {exit_code})"
 
-    return False, (
-        "verifier script did not print a JSON object with a 'success' field"
-    )
+    return False, ("verifier script did not print a JSON object with a 'success' field")

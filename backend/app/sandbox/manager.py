@@ -7,8 +7,8 @@ from pathlib import Path, PurePosixPath
 
 from e2b import AsyncSandbox
 from solari_core import CodeLanguage, ConcurrencyLimitError
-from solari_sandbox import Sandbox
 
+# from solari_sandbox import Sandbox
 from app.agents.tools.models import ToolResult
 from app.logger import get_logger
 
@@ -23,7 +23,7 @@ logger = get_logger()
 #: calls operations both clients expose, so it does not care which one created
 #: the handle; the alias keeps that explicit instead of pretending one
 #: provider's type covers the other.
-SandboxHandle = AsyncSandbox | Sandbox
+SandboxHandle = AsyncSandbox
 
 #: How long a match waits for a free Solari slot before giving up. Solari runs
 #: one live sandbox at a time, so a match requested while another is running

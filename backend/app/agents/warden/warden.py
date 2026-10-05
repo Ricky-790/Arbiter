@@ -21,7 +21,7 @@ class WardenAgent(ToolChoosingAgent):
         required: every model in the directory is BYOK."""
         super().__init__(
             model_name=model_name,
-            instructions=with_tips(WARDEN_INSTRUCTIONS, instructions),
+            instructions=WARDEN_INSTRUCTIONS,
             allowed_tools={
                 "bash",
                 "read_file",

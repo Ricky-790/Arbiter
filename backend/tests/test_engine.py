@@ -7,6 +7,7 @@ from app.agents.base import AgentUnavailableError
 from app.agents.models import AgentType
 from app.agents.tools import ToolCall, ToolResult
 from app.engine import Engine, MatchStatus
+from app.engine.engine import WARDEN_SUDOERS_PATH
 from app.sandbox.models import ChallengeSpec, SandboxEvent, SandboxEventType
 
 
@@ -86,10 +87,23 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(engine.state.status, MatchStatus.RUNNING)
         self.assertEqual(engine.state.prisoner.credits, 50)
         self.assertEqual(engine.state.warden.credits, 50)
-        commands = [kwargs["command"] for operation, kwargs in manager.calls if operation == "run_command"]
-        self.assertTrue(any("useradd" in command and "warden" in command for command in commands))
-        self.assertTrue(any("usermod -aG sudo warden" in command for command in commands))
-        self.assertTrue(any("/root/secret.txt" in command and "ARB{flag}" in command for command in commands))
+        commands = [
+            kwargs["command"]
+            for operation, kwargs in manager.calls
+            if operation == "run_command"
+        ]
+        self.assertTrue(
+            any("useradd" in command and "warden" in command for command in commands)
+        )
+        self.assertTrue(
+            any("usermod -aG sudo warden" in command for command in commands)
+        )
+        self.assertTrue(
+            any(
+                "/root/secret.txt" in command and "ARB{flag}" in command
+                for command in commands
+            )
+        )
 
     def test_setup_commands_own_files_and_run_setup_script(self) -> None:
         engine = Engine(
@@ -116,6 +130,44 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("chown prisoner /challenge/hidden/.secret", file_commands[0])
         self.assertIn("chmod 600 /challenge/hidden/.secret", file_commands[0])
 
+    def test_setup_closes_the_empty_root_password_hole(self) -> None:
+        """Without this both agents are root, and every other rule is moot."""
+        engine = Engine(
+            match_id="setup-2",
+            challenge=ChallengeSpec(name="t", description="t"),
+            sandbox_manager=FakeSandboxManager(),  # type: ignore[arg-type]
+        )
+
+        self.assertIn("passwd -l root", engine._setup_commands())
+
+    def test_setup_gives_the_warden_passwordless_sudo(self) -> None:
+        engine = Engine(
+            match_id="setup-3",
+            challenge=ChallengeSpec(name="t", description="t"),
+            sandbox_manager=FakeSandboxManager(),  # type: ignore[arg-type]
+        )
+
+        rule = [c for c in engine._setup_commands() if WARDEN_SUDOERS_PATH in c]
+        self.assertEqual(len(rule), 1)
+        self.assertIn("warden ALL=(ALL) NOPASSWD:ALL", rule[0])
+        self.assertIn(f"chmod 440 {WARDEN_SUDOERS_PATH}", rule[0])
+        # Validated before sudo ever reads it: a bad rule must fail setup
+        # rather than break sudo for the rest of the match.
+        self.assertIn(f"visudo -cf {WARDEN_SUDOERS_PATH}", rule[0])
+
+    def test_the_warden_rule_names_the_configured_warden_user(self) -> None:
+        engine = Engine(
+            match_id="setup-4",
+            challenge=ChallengeSpec(
+                name="t", description="t", warden_user="overseer"
+            ),
+            sandbox_manager=FakeSandboxManager(),  # type: ignore[arg-type]
+        )
+
+        rule = [c for c in engine._setup_commands() if WARDEN_SUDOERS_PATH in c]
+        self.assertIn("overseer ALL=(ALL) NOPASSWD:ALL", rule[0])
+        self.assertNotIn("warden ALL=", rule[0])
+
     async def test_tool_cost_and_cooldown_are_centrally_enforced(self) -> None:
         engine, manager = self.make_engine()
         await engine.start()
@@ -132,11 +184,16 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(cooldown_result.success)
         self.assertEqual(cooldown_result.error, "Tool cooldown is active")
         self.assertIn(
-            ("run_command", {"match_id": "match-1", "command": "id", "user": "prisoner"}),
+            (
+                "run_command",
+                {"match_id": "match-1", "command": "id", "user": "prisoner"},
+            ),
             manager.calls,
         )
 
-    async def test_trap_overrides_warden_cooldown_and_prevents_immediate_rearm(self) -> None:
+    async def test_trap_overrides_warden_cooldown_and_prevents_immediate_rearm(
+        self,
+    ) -> None:
         engine, _ = self.make_engine()
         await engine.start()
 
@@ -161,6 +218,7 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(rearm.success)
         self.assertIn("cannot be re-armed", rearm.error or "")
         self.assertTrue(reaction.success)
+
     async def test_engine_evaluates_flag_submission_and_finishes_match(self) -> None:
         engine, _ = self.make_engine()
         await engine.start()
@@ -280,3 +338,189 @@ class AgentUnavailableTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(engine.state.winner, AgentType.PRISONER)
         self.assertIn("not available", engine.state.end_reason or "")
         self.assertEqual(manager.destroyed_match_id, "match-1")
+
+
+class SideStatsTests(unittest.IsolatedAsyncioTestCase):
+    """The end-of-match summary the reviewer reads is written from live state."""
+
+    def make_engine(self) -> Engine:
+        return Engine(
+            match_id="match-stats",
+            challenge=ChallengeSpec(
+                name="test",
+                description="test",
+                flag={"value": "ARB{flag}"},
+                flag_structure={"value": "str"},
+            ),
+            sandbox_manager=FakeSandboxManager(),
+        )
+
+    async def test_tool_calls_are_counted_per_side(self) -> None:
+        engine = self.make_engine()
+        await engine.start()
+
+        await engine.execute_tool_call(
+            AgentType.PRISONER, ToolCall(name="bash", arguments={"command": "id"})
+        )
+        await engine.execute_tool_call(
+            AgentType.WARDEN, ToolCall(name="bash", arguments={"command": "id"})
+        )
+        await engine.execute_tool_call(
+            AgentType.PRISONER, ToolCall(name="bash", arguments={"command": "id"})
+        )
+
+        self.assertEqual(engine.state.prisoner.tool_calls, 2)
+        self.assertEqual(engine.state.warden.tool_calls, 1)
+
+    async def test_a_replayed_call_is_not_counted(self) -> None:
+        """A fork rebuild restores history; it does not make new calls."""
+        engine = self.make_engine()
+        await engine.start()
+        engine.begin_replay()
+
+        await engine.execute_tool_call(
+            AgentType.PRISONER,
+            ToolCall(name="bash", arguments={"command": "id"}),
+            replay_at=engine.state.started_at,
+        )
+
+        self.assertEqual(engine.state.prisoner.tool_calls, 0)
+
+    async def test_the_summary_carries_credits_and_tool_calls(self) -> None:
+        engine = self.make_engine()
+        await engine.start()
+
+        stats = engine._side_stats(AgentType.PRISONER)
+
+        self.assertEqual(stats["tool_calls"], 0)
+        self.assertIsInstance(stats["credits"], int)
+
+    async def test_each_side_carries_only_its_own_trap_counter(self) -> None:
+        """A counter the other side owns would read as a real zero."""
+        engine = self.make_engine()
+        await engine.start()
+
+        self.assertEqual(
+            set(engine._side_stats(AgentType.PRISONER)),
+            {"credits", "tool_calls", "times_trapped"},
+        )
+        self.assertEqual(
+            set(engine._side_stats(AgentType.WARDEN)),
+            {"credits", "tool_calls", "traps_armed", "traps_triggered"},
+        )
+
+    async def test_the_summary_is_a_plain_dict_for_jsonb(self) -> None:
+        engine = self.make_engine()
+        await engine.start()
+
+        stats = engine._side_stats(AgentType.WARDEN)
+
+        self.assertIs(type(stats), dict)
+        for value in stats.values():
+            self.assertIsInstance(value, int)
+
+
+class TrapStatsTests(unittest.IsolatedAsyncioTestCase):
+    """Trap activity is counted in the Engine, not re-derived by the reviewer."""
+
+    def make_engine(self) -> Engine:
+        return Engine(
+            match_id="match-traps",
+            challenge=ChallengeSpec(
+                name="test",
+                description="test",
+                flag={"value": "ARB{flag}"},
+                flag_structure={"value": "str"},
+            ),
+            sandbox_manager=FakeSandboxManager(),
+        )
+
+    async def arm(self, engine: Engine, process: str) -> ToolResult:
+        return await engine.execute_tool_call(
+            AgentType.WARDEN,
+            ToolCall(name="auto_kill", arguments={"process": process}),
+        )
+
+    async def test_a_successful_arming_is_counted(self) -> None:
+        engine = self.make_engine()
+        await engine.start()
+
+        await self.arm(engine, "worker")
+
+        self.assertEqual(engine.state.warden.traps_armed, 1)
+
+    async def test_a_rejected_arming_is_not_counted(self) -> None:
+        """One trap at a time: the second call arms nothing, so it is not a trap."""
+        engine = self.make_engine()
+        await engine.start()
+        await self.arm(engine, "worker")
+
+        await self.arm(engine, "other")
+
+        self.assertEqual(engine.state.warden.traps_armed, 1)
+
+    async def test_a_firing_counts_for_both_sides(self) -> None:
+        engine = self.make_engine()
+        await engine.start()
+        await self.arm(engine, "worker")
+
+        fired = await engine.handle_sandbox_event(
+            SandboxEvent(type=SandboxEventType.PROCESS_STARTED, process_name="worker")
+        )
+
+        self.assertTrue(fired)
+        self.assertEqual(engine.state.warden.traps_triggered, 1)
+        self.assertEqual(engine.state.prisoner.times_trapped, 1)
+
+    async def test_an_unrelated_event_fires_nothing(self) -> None:
+        engine = self.make_engine()
+        await engine.start()
+        await self.arm(engine, "worker")
+
+        fired = await engine.handle_sandbox_event(
+            SandboxEvent(
+                type=SandboxEventType.PROCESS_STARTED, process_name="something-else"
+            )
+        )
+
+        self.assertFalse(fired)
+        self.assertEqual(engine.state.warden.traps_triggered, 0)
+        self.assertEqual(engine.state.prisoner.times_trapped, 0)
+
+    async def test_the_firing_records_its_target_and_turn(self) -> None:
+        """Which trap fired, and where in the match -- not just that one did."""
+        engine = self.make_engine()
+        await engine.start()
+        await self.arm(engine, "worker")
+        engine.state.prisoner.turns = 3
+
+        await engine.handle_sandbox_event(
+            SandboxEvent(type=SandboxEventType.PROCESS_STARTED, process_name="worker")
+        )
+
+        recorded = [
+            event
+            for event in engine.state.events
+            if event.get("type") == "trap_triggered"
+        ][-1]
+        self.assertEqual(recorded["trap"], "auto_kill")
+        self.assertEqual(recorded["target"], "worker")
+        self.assertEqual(recorded["prisoner_turn"], 3)
+
+    async def test_each_side_is_summarised_with_its_own_traps(self) -> None:
+        engine = self.make_engine()
+        await engine.start()
+        await self.arm(engine, "worker")
+        await engine.handle_sandbox_event(
+            SandboxEvent(type=SandboxEventType.PROCESS_STARTED, process_name="worker")
+        )
+
+        warden = engine._side_stats(AgentType.WARDEN)
+        prisoner = engine._side_stats(AgentType.PRISONER)
+
+        self.assertEqual(warden["traps_armed"], 1)
+        self.assertEqual(warden["traps_triggered"], 1)
+        # The Prisoner arms nothing, so it carries no arming counter at all.
+        self.assertNotIn("traps_armed", prisoner)
+        self.assertEqual(prisoner["times_trapped"], 1)
+        self.assertNotIn("traps_triggered", prisoner)

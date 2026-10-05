@@ -1460,6 +1460,40 @@
     padding: 0.7rem 0.75rem;
   }
 
+  /* The strategy a side runs: either chosen from the library or written out.
+     The two are alternatives, so exactly one of the two bodies is on screen. */
+  .agent-strategy {
+    margin-top: 0.9rem;
+  }
+
+  .agent-strategy .field-textarea {
+    margin-top: 0.6rem;
+  }
+
+  /* A saved entry runs exactly as stored, so its text is read rather than
+     edited — changing it here would be a different strategy. */
+  .agent-strategy-picked {
+    margin-top: 0.6rem;
+    border-left: 2px solid var(--color-primary);
+    padding: 0.55rem 0 0.1rem 0.75rem;
+  }
+
+  .agent-panel.prisoner .agent-strategy-picked {
+    border-left-color: var(--color-coral);
+  }
+
+  .agent-panel.warden .agent-strategy-picked {
+    border-left-color: var(--color-moss);
+  }
+
+  .agent-strategy-picked p {
+    margin-top: 0.4rem;
+    color: var(--color-foreground);
+    font-size: 0.8rem;
+    line-height: 1.65;
+    white-space: pre-wrap;
+  }
+
   .launch-actions {
     display: flex;
     flex-wrap: wrap;
@@ -1843,12 +1877,138 @@
     padding-block: 1.5rem 2rem;
   }
 
-  .challenge-detail-top {
+  /* The band carries the brief only, so the first field sits flush with the
+     band's own padding and both fields keep a readable measure. */
+  .challenge-detail-band .spec-section:first-of-type {
+    margin-top: 0;
+  }
+
+  .challenge-detail-band .spec-content {
+    max-width: 72ch;
+  }
+
+  /* Match stats: what each side spent, sitting directly above the transcripts
+     it explains. One card per side, carrying the same accent colour as the
+     panel it belongs to, so the two read as one column of evidence. */
+  .stats-band {
+    border-bottom: 1px solid var(--color-border);
+    padding-block: 1.8rem 2rem;
+  }
+
+  .stats-cards {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1rem;
+    margin-top: 1.1rem;
+  }
+
+  .stats-card {
+    min-width: 0;
+    border: 1px solid var(--color-border);
+    border-top: 2px solid var(--color-border);
+    background: var(--color-panel);
+    padding: 1rem 1.1rem 1.2rem;
+  }
+
+  .stats-card.prisoner {
+    border-top-color: var(--color-coral);
+  }
+
+  .stats-card.warden {
+    border-top-color: var(--color-moss);
+  }
+
+  .stats-card-header {
     display: flex;
     flex-wrap: wrap;
-    align-items: center;
-    justify-content: space-between;
+    align-items: baseline;
+    gap: 0.5rem 1rem;
+  }
+
+  .stats-card-name {
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+  }
+
+  .stats-card.prisoner .stats-card-name {
+    color: var(--color-coral);
+  }
+
+  .stats-card.warden .stats-card-name {
+    color: var(--color-moss);
+  }
+
+  .stats-card-model {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--color-muted-foreground);
+    font-family: var(--font-mono);
+    font-size: 0.62rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .stats-card-role {
+    margin-left: auto;
+    color: var(--color-muted-foreground);
+    font-family: var(--font-mono);
+    font-size: 0.56rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .stats-card-empty {
+    margin-top: 0.9rem;
+    color: var(--color-muted-foreground);
+    font-family: var(--font-mono);
+    font-size: 0.62rem;
+  }
+
+  .stats-rows {
+    display: grid;
+    gap: 0;
+    margin: 0.9rem 0 0;
+    border-top: 1px solid var(--color-border);
+  }
+
+  /* The strategy this side ran, above its numbers. Long free text, so it is
+     capped and scrolls rather than stretching the card. */
+  .stats-strategy {
+    margin-top: 0.9rem;
+    border-left: 2px solid var(--color-border);
+    padding-left: 0.7rem;
+  }
+
+  .stats-card.prisoner .stats-strategy {
+    border-left-color: var(--color-coral);
+  }
+
+  .stats-card.warden .stats-strategy {
+    border-left-color: var(--color-moss);
+  }
+
+  .stats-strategy p {
+    max-height: 7rem;
+    overflow-y: auto;
+    margin-top: 0.35rem;
+    color: var(--color-foreground);
+    font-size: 0.78rem;
+    line-height: 1.6;
+    white-space: pre-wrap;
+  }
+
+  .stats-row {
+    display: flex;
     gap: 1rem;
+    align-items: baseline;
+    justify-content: space-between;
+    border-bottom: 1px solid var(--color-border);
+    padding-block: 0.5rem;
+  }
+
+  .stats-row dt {
     color: var(--color-muted-foreground);
     font-family: var(--font-mono);
     font-size: 0.6rem;
@@ -1856,26 +2016,129 @@
     text-transform: uppercase;
   }
 
-  .challenge-detail-top strong {
-    color: var(--color-primary);
-    font-weight: 400;
+  .stats-row dd {
+    color: var(--color-foreground);
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
   }
 
-  .challenge-detail-grid {
+  .stats-row dd.is-signal {
+    color: var(--color-primary);
+    font-weight: 700;
+  }
+
+  .stats-tools {
+    margin-top: 0.9rem;
+  }
+
+  .stats-trap-strip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 1rem;
+    align-items: center;
+    margin-top: 1rem;
+    border-left: 2px solid var(--color-primary);
+    padding-left: 0.8rem;
+  }
+
+  .stats-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+  }
+
+  /* The card's one action, pinned to the bottom so the two cards' buttons line
+     up however many stat rows each side has. The colour is the app's own
+     `.button-primary`; only the layout is card-specific here. */
+  .stats-card {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .stats-card-actions {
+    margin-top: auto;
+    padding-top: 1rem;
+  }
+
+  .stats-revise {
+    width: 100%;
+  }
+
+  /* The app's yellow, deepened rather than inverted: `.button-primary` inverts to
+     the foreground colour on hover, which reads as white here and loses the
+     button's identity. Mixing toward black keeps it in the same hue and stays
+     tied to the theme variable. */
+  .stats-revise:hover:not(:disabled) {
+    border-color: color-mix(in oklch, var(--color-primary) 88%, black);
+    background: color-mix(in oklch, var(--color-primary) 88%, black);
+    transform: translateY(-2px);
+  }
+
+  /* Nothing to revise: drop the fill, so an actionable button and a locked one
+     never look alike. */
+  .stats-revise:disabled {
+    border-color: var(--color-border);
+    background: transparent;
+    color: var(--color-muted-foreground);
+    cursor: not-allowed;
+    opacity: 0.45;
+  }
+
+  /* Save-strategy dialog: the label the library will list this strategy under,
+     shown rather than typed because the backend derives it. */
+  .save-strategy-field {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    gap: 2rem;
-    margin-top: 1.2rem;
+    gap: 0.35rem;
+    margin-block: 1.2rem 0.4rem;
+    border-left: 2px solid var(--color-primary);
+    padding-left: 0.8rem;
+  }
+
+  .save-strategy-description {
+    color: var(--color-foreground);
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    line-height: 1.6;
+  }
+
+  .save-strategy-hint {
+    color: var(--color-muted-foreground);
+    font-size: 0.68rem;
+    line-height: 1.55;
+  }
+
+  .stats-chip {
+    display: inline-flex;
+    gap: 0.45rem;
+    align-items: baseline;
+    border: 1px solid var(--color-border);
+    padding: 0.25rem 0.5rem;
+    color: var(--color-muted-foreground);
+    font-family: var(--font-mono);
+    font-size: 0.6rem;
+    letter-spacing: 0.04em;
+  }
+
+  .stats-chip-count {
+    color: var(--color-foreground);
   }
 
   .event-section {
     padding-block: 2.2rem 4rem;
   }
 
+  /* The "Stats" and "Moves" headings open their bands, so they sit flush with
+     the band's own padding and the cards below them carry the separation. */
+  .stats-band .agent-heading,
+  .event-section .agent-heading {
+    margin-top: 0;
+  }
+
   .event-grid {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 1rem;
+    margin-top: 1.1rem;
   }
 
   .event-panel {
@@ -2208,6 +2471,265 @@
     font-family: var(--font-mono);
     font-size: 0.65rem;
     line-height: 1.6;
+  }
+
+  /* Archive: the two record sections, strategies above and forks below. Each list
+     is a column of rows rather than a card grid, so a long library still reads
+     as a ledger. */
+  .archive-section {
+    margin-top: 2.6rem;
+  }
+
+  .strategy-list {
+    margin-top: 1.1rem;
+    border-top: 1px solid var(--color-primary);
+  }
+
+  .strategy-row {
+    position: relative;
+    display: grid;
+    width: 100%;
+    grid-template-columns:
+      3rem 6rem minmax(11rem, 1.3fr) minmax(8rem, 0.7fr)
+      minmax(9rem, 0.7fr) minmax(8rem, 0.6fr) 2rem;
+    align-items: center;
+    gap: 1.25rem;
+    border-bottom: 1px solid var(--color-border);
+    padding: 1.1rem 0.8rem 1.1rem 0;
+    text-align: left;
+    transition:
+      background 180ms ease,
+      padding 180ms ease;
+  }
+
+  .strategy-row::before {
+    position: absolute;
+    top: -1px;
+    bottom: -1px;
+    left: 0;
+    width: 3px;
+    background: var(--color-primary);
+    content: "";
+    opacity: 0;
+    transition: opacity 180ms ease;
+  }
+
+  .strategy-row:hover {
+    background: var(--color-panel);
+    padding-left: 1rem;
+  }
+
+  .strategy-row:hover::before {
+    opacity: 1;
+  }
+
+  .strategy-row-index {
+    color: var(--color-primary);
+    font-family: var(--font-mono);
+    font-size: 0.62rem;
+  }
+
+  /* Which side the wording is for, in that side's own accent. */
+  .strategy-row-side,
+  .strategy-side-tag {
+    justify-self: start;
+    border: 1px solid currentcolor;
+    padding: 0.2rem 0.45rem;
+    font-family: var(--font-mono);
+    font-size: 0.56rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+
+  /* Beside a page title the meta slot renders large, so the tag opts back down
+     to chip size rather than inheriting that scale. */
+  .page-meta .strategy-side-tag,
+  .strategy-header .strategy-side-tag {
+    font-size: 0.56rem;
+    font-weight: 400;
+    line-height: 1.6;
+  }
+
+  .strategy-row-side.is-prisoner,
+  .strategy-side-tag.is-prisoner {
+    color: var(--color-coral);
+  }
+
+  .strategy-row-side.is-warden,
+  .strategy-side-tag.is-warden {
+    color: var(--color-moss);
+  }
+
+  .strategy-row-text {
+    min-width: 0;
+    color: var(--color-foreground);
+    font-size: 0.86rem;
+    line-height: 1.5;
+  }
+
+  .strategy-row-from,
+  .strategy-row-saved,
+  .strategy-row-challenge {
+    display: grid;
+    min-width: 0;
+    gap: 0.2rem;
+  }
+
+  .strategy-row-label {
+    color: var(--color-muted-foreground);
+    font-family: var(--font-mono);
+    font-size: 0.56rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .strategy-row-id {
+    overflow: hidden;
+    color: var(--color-foreground);
+    font-family: var(--font-mono);
+    font-size: 0.66rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .strategy-row-arrow {
+    color: var(--color-muted-foreground);
+    opacity: 0;
+    transition:
+      opacity 180ms ease,
+      transform 180ms ease;
+  }
+
+  .strategy-row:hover .strategy-row-arrow {
+    color: var(--color-primary);
+    opacity: 1;
+    transform: translate(2px, -2px);
+  }
+
+  /* Strategy detail: a quiet header, the wording in one small card, then the
+     lineage. The strategy is context here, not the headline. */
+  .strategy-header {
+    border-bottom: 1px solid var(--color-border);
+    padding-bottom: 1.1rem;
+  }
+
+  .strategy-header-id {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem 1rem;
+    align-items: center;
+  }
+
+  .strategy-back {
+    display: inline-flex;
+    gap: 0.4rem;
+    align-items: center;
+    color: var(--color-muted-foreground);
+    font-family: var(--font-mono);
+    font-size: 0.62rem;
+    letter-spacing: 0.08em;
+    text-decoration: none;
+    text-transform: uppercase;
+    transition: color 180ms ease;
+  }
+
+  .strategy-back:hover {
+    color: var(--color-primary);
+  }
+
+  /* Narrower than the lineage rows below it, so the wording reads as one card of
+     context rather than another full-bleed band. */
+  .strategy-card {
+    max-width: 46rem;
+    margin-top: 1.4rem;
+    border: 1px solid var(--color-border);
+    border-left: 2px solid var(--color-primary);
+    background: var(--color-panel);
+    padding: 1.1rem 1.2rem 1.2rem;
+  }
+
+  .strategy-card-head {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1rem;
+    align-items: baseline;
+    justify-content: space-between;
+  }
+
+  .strategy-card-text {
+    max-width: 78ch;
+    margin-top: 0.8rem;
+    color: var(--color-foreground);
+    font-size: 0.9rem;
+    line-height: 1.7;
+    white-space: pre-wrap;
+  }
+
+  .lineage-row {
+    position: relative;
+    display: grid;
+    grid-template-columns:
+      minmax(10rem, 1fr) minmax(14rem, 1.2fr) 8rem minmax(9rem, 0.6fr)
+      2rem;
+    align-items: center;
+    gap: 1.25rem;
+    border-bottom: 1px solid var(--color-border);
+    padding: 1rem 0.8rem 1rem 0;
+    transition:
+      background 180ms ease,
+      padding 180ms ease;
+  }
+
+  .lineage-row.is-origin {
+    border-top: 1px solid var(--color-primary);
+  }
+
+  .lineage-row:hover {
+    background: var(--color-panel);
+    padding-left: 1rem;
+  }
+
+  .lineage-row-challenge {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--color-foreground);
+    font-size: 0.86rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .lineage-row-models {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--color-muted-foreground);
+    font-family: var(--font-mono);
+    font-size: 0.66rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .lineage-row-caption,
+  .lineage-row-id {
+    overflow: hidden;
+    color: var(--color-muted-foreground);
+    font-family: var(--font-mono);
+    font-size: 0.62rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .lineage-row-arrow {
+    color: var(--color-muted-foreground);
+    opacity: 0;
+    transition:
+      opacity 180ms ease,
+      transform 180ms ease;
+  }
+
+  .lineage-row:hover .lineage-row-arrow {
+    color: var(--color-primary);
+    opacity: 1;
+    transform: translate(2px, -2px);
   }
 
   /* Forks tab: one saved checkpoint per row, read as a record rather than a
@@ -2910,7 +3432,7 @@
   .role-grid,
   .agent-grid,
   .event-grid,
-  .challenge-detail-grid,
+  .stats-cards,
   .fork-memory {
     grid-template-columns: 1fr;
   }
@@ -3005,6 +3527,46 @@
   .fork-row-arrow {
     grid-column: 3;
     grid-row: 1;
+  }
+
+  /* The archive rows collapse the same way: keep the subject and drop the
+     provenance columns, which are one click away on the detail page. */
+  .strategy-row {
+    grid-template-columns: 2.5rem 5.5rem minmax(0, 1fr);
+    gap: 0.7rem;
+  }
+
+  .strategy-row-from,
+  .strategy-row-saved,
+  .strategy-row-challenge {
+    display: none;
+  }
+
+  .strategy-row-arrow {
+    display: none;
+  }
+
+  .lineage-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.4rem 0.8rem;
+  }
+
+  .lineage-row-challenge {
+    grid-column: 1;
+  }
+
+  .lineage-row-models {
+    grid-column: 1 / -1;
+  }
+
+  .lineage-row-outcome {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .lineage-row-caption,
+  .lineage-row-arrow {
+    display: none;
   }
 
   .match-masthead {

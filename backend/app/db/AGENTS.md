@@ -20,6 +20,7 @@ The Engine remains the source of truth for live match state. The database stores
 - `match_events`
 - `match_snapshots`
 - `match_agent_messages`
+- `strategies`
 
 ---
 
@@ -68,6 +69,73 @@ Stores one Prisoner-vs-Warden match.
 | `started_at`        | `TIMESTAMP WITH TIME ZONE` | Nullable                       |
 | `finished_at`       | `TIMESTAMP WITH TIME ZONE` | Nullable                       |
 | `created_at`        | `TIMESTAMP WITH TIME ZONE` | Not null                       |
+| `prisoner_stats`    | `JSONB`                    | Nullable                       |
+| `warden_stats`      | `JSONB`                    | Nullable                       |
+| `strategy`          | `JSONB`                    | Nullable                       |
+| `strategy_id`       | `JSONB`                    | Nullable                       |
+
+### `prisoner_stats` / `warden_stats`
+
+The Engine's end-of-match summary for one side, written once with the
+`match_finished` event and `NULL` until then (and for matches recorded before
+the columns existed):
+
+```text
+prisoner_stats = {"credits": int, "tool_calls": int, "times_trapped": int}
+warden_stats   = {"credits": int, "tool_calls": int,
+                  "traps_armed": int, "traps_triggered": int}
+```
+
+`credits` is what the side had left; `tool_calls` is how many actions it
+requested, rejected ones included, so it matches that side's `tool_call` rows in
+`match_events`. Calls replayed to rebuild a fork's sandbox are not counted.
+
+The trap counters are each side's own: the Prisoner records how often it was
+caught, the Warden how many traps it armed and how many of them landed. A
+counter the other side owns is simply absent, so a reader cannot mistake it for
+a real zero. Only successful armings count, and a firing increments both sides
+at once.
+
+JSONB rather than columns because more counters are expected over time and this
+is a snapshot, not a query key. `app/reviewer/` reads it; nothing else queries
+inside it.
+
+### `strategy` / `strategy_id`
+
+The approach each side was *started* with, and the library rows those approaches
+were later promoted to. Both are keyed by side, because one match can carry a
+strategy for the Prisoner and the Warden at once:
+
+```text
+strategy    = {"prisoner": str, "warden": str}
+strategy_id = {"prisoner": "<uuid>", "warden": "<uuid>"}
+```
+
+`strategy` is written once when the match row is created, from the operator's
+tips or from the library strategy a side was started with — the same text the
+worker feeds the agent, so what ran and what is saved cannot drift. A side with
+no strategy is absent rather than null; neither side having one stores `NULL`.
+
+`strategy_id` records the `strategies.id` each side **ran**, and is written from
+both ends of a strategy's life:
+
+- at queue time, for a side the start request named a `*_strategy_id` for — the
+  match is about to run that library strategy, so it says so
+- by `POST /api/v1/strategies/save-strategy`, which writes the id of the row
+  promoted out of this match
+
+Both directions are needed for one question: *which matches ran this strategy?*
+The text cannot answer it — it is copied onto each match, so two matches sharing
+wording are unrelated — and with only the promotion write, a strategy's matches
+would be just the single match it came from. Reading it means either side's
+entry may name the strategy, so a query ORs over both keys.
+
+It is keyed by side rather than a single FK because one match can carry a
+strategy per side. Values are **strings**, because a JSONB object cannot hold a
+native UUID; readers convert back.
+
+Both are JSONB maps closed over the two sides. Do not add a third key without
+deciding what reads it.
 
 ### `status` values
 
@@ -208,6 +276,56 @@ archive listing never reads it. `(match_id, actor)` is unique.
 
 ---
 
+## `strategies`
+
+The library the self-improvement loop grows: one reusable approach per side per
+match, promoted out of a *finished* match rather than authored directly.
+
+| Column                | Type                       | Constraints                            |
+| --------------------- | -------------------------- | -------------------------------------- |
+| `id`                  | `UUID`                     | Primary key                            |
+| `match_id`            | `UUID`                     | FK → `matches.id`, not null, cascades  |
+| `challenge_id`        | `UUID`                     | FK → `challenges.id`, not null         |
+| `user`                | `VARCHAR(16)`              | Not null (`prisoner` / `warden`)       |
+| `one_line_description`| `TEXT`                     | Not null                               |
+| `strategy`            | `TEXT`                     | Not null                               |
+| `origin_strat_id`     | `UUID`                     | FK → `strategies.id`, nullable         |
+| `created_at`          | `TIMESTAMP WITH TIME ZONE` | Not null                               |
+
+`(match_id, user)` is unique, so a match has at most one strategy per side and
+promoting the same side twice is a no-op that keeps the first row — including
+its `origin_strat_id`.
+
+`strategy` is the text exactly as the match ran it, copied from
+`matches.strategy[user]` — not sent by the caller, so the two cannot drift.
+`one_line_description` is derived from that text (its first non-blank line,
+truncated) rather than accepted as input.
+
+`challenge_id` is denormalised from the match, so the library can be scoped to a
+challenge without a join. A strategy is only meaningful against the challenge it
+was played on; the API refuses to start a match from a strategy belonging to a
+different one.
+
+`origin_strat_id` is the strategy this one was evolved from, when the match was
+itself started from a library strategy. It is a self-reference that clears on
+delete rather than cascading, so lineage never takes descendants with it.
+
+It is **not populated yet**. The input id is now recorded — a match started from
+a strategy carries it in `matches.strategy_id` — so the ancestor is derivable,
+but `save-strategy` takes only `match_id` and `user` and does not look it up.
+Wiring it up means reading the parent match's `strategy_id[user]` at promotion
+time; the column and the FK are already there.
+
+> `user` is a reserved word in PostgreSQL. SQLAlchemy quotes it, so ORM and
+> Alembic code is fine, but a raw `SELECT user, ... FROM strategies` resolves to
+> the `USER` builtin. Write `"user"` in hand-written SQL.
+
+### Indexes
+
+`match_id`, `challenge_id`, `user`, `origin_strat_id`, `created_at`.
+
+---
+
 ## Relationships
 
 ```text
@@ -215,6 +333,8 @@ Challenge 1 ──── N Matches
 Match     1 ──── N MatchEvents
 Match     1 ──── N MatchSnapshots
 Match     1 ──── N MatchAgentMessages
+Match     1 ──── N Strategies
+Strategy  1 ──── N Strategies   (origin_strat_id)
 ```
 
 SQLAlchemy relationships:
@@ -227,8 +347,8 @@ Match.events
 MatchEvent.match
 ```
 
-`MatchSnapshot` and `MatchAgentMessages` are keyed by `match_id` but expose no
-ORM `relationship()`; they are read one match at a time.
+`MatchSnapshot`, `MatchAgentMessages` and `Strategy` are keyed by `match_id` but
+expose no ORM `relationship()`; they are read one match at a time.
 
 ---
 
@@ -267,7 +387,8 @@ app/db/
 │   ├── challenge.py
 │   ├── match.py
 │   ├── match_event.py
-│   └── match_snapshot.py
+│   ├── match_fork.py
+│   └── strategy.py
 ├── ...
 ```
 

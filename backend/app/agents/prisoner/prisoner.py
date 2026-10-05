@@ -12,7 +12,6 @@ class PrisonerAgent(ToolChoosingAgent):
         model_name: str = "openai:gpt-4o-mini",
         *,
         objective: str | None = None,
-        instructions: str | None = None,
         scripted_calls: Iterable[ToolCall] | None = None,
         api_key: str | None = None,
     ) -> None:
@@ -21,7 +20,7 @@ class PrisonerAgent(ToolChoosingAgent):
         required: every model in the directory is BYOK."""
         super().__init__(
             model_name=model_name,
-            instructions=with_tips(PRISONER_INSTRUCTIONS, instructions),
+            instructions=PRISONER_INSTRUCTIONS,
             allowed_tools={
                 "bash",
                 "read_file",

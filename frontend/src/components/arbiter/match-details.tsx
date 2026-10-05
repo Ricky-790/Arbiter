@@ -8,11 +8,16 @@ import {
   EventGroup,
   type DescribedLine,
 } from "@/components/arbiter/event-group";
+import { MatchStats } from "@/components/arbiter/match-stats";
 import { OutcomeBadge } from "@/components/arbiter/outcome-badge";
 import { MatchMasthead } from "@/components/arbiter/match-masthead";
-import { Field, FileBlocks, JsonBlock } from "@/components/arbiter/spec-blocks";
-import { forkMatch, getChallenge, listAllMatchEvents } from "@/lib/api";
-import type { MatchEventSchema, MatchListSchema } from "@/lib/dto";
+import { Field } from "@/components/arbiter/spec-blocks";
+import { forkMatch, getMatchSummary, listAllMatchEvents } from "@/lib/api";
+import type {
+  MatchEventSchema,
+  MatchListSchema,
+  MatchSummaryResponse,
+} from "@/lib/dto";
 import {
   formatArguments,
   formatDateTime,
@@ -27,6 +32,8 @@ import {
 import { canFork } from "@/lib/match-status";
 
 const NO_EVENTS: MatchEventSchema[] = [];
+const NO_SUMMARIES: MatchSummaryResponse[] = [];
+const NO_SIDES: Record<string, MatchSummaryResponse | undefined> = {};
 
 /**
  * The dialog (and the Radix alert-dialog it composes) is only pulled in once
@@ -39,20 +46,22 @@ const ForkDialog = lazy(() =>
 );
 
 /**
- * A settled match's recorded history: the challenge brief plus both agents'
- * transcripts, grouped into forkable turns.
+ * A settled match: what was played, what each side spent, and both transcripts.
  *
  * `MatchView` only routes here once the row is out of its live statuses, and it
- * owns the match row itself, so this view fetches just the challenge spec and
- * the event history.
+ * owns the match row itself, so this view fetches the reviewer's summary — which
+ * carries the challenge brief and both sides' totals — and the event history.
+ * Nothing here needs polling: the row is already terminal.
  */
 export function MatchDetails({ match }: { match: MatchListSchema }) {
   const queryClient = useQueryClient();
   const [forkTarget, setForkTarget] = useState<EventTurn | null>(null);
 
-  const challengeQuery = useQuery({
-    queryKey: ["challenge", match.challenge_id],
-    queryFn: () => getChallenge(match.challenge_id),
+  // The summary always answers with a list, one entry per side, so this asks for
+  // both and lets each entry carry its own stats and strategy.
+  const summaryQuery = useQuery({
+    queryKey: ["match-summary", match.id],
+    queryFn: () => getMatchSummary(match.id),
   });
 
   const eventsQuery = useQuery({
@@ -60,7 +69,10 @@ export function MatchDetails({ match }: { match: MatchListSchema }) {
     queryFn: () => listAllMatchEvents(match.id),
   });
 
-  const challenge = challengeQuery.data ?? null;
+  // Every entry repeats the same match row, so the first one speaks for all of
+  // them. `null` until the call lands, and `[]` is all it can ever be otherwise.
+  const entries = summaryQuery.data ?? NO_SUMMARIES;
+  const overview = entries[0] ?? null;
   const events = eventsQuery.data ?? NO_EVENTS;
 
   const fork = useMutation({
@@ -98,13 +110,25 @@ export function MatchDetails({ match }: { match: MatchListSchema }) {
     [events],
   );
 
+  // Both sides land in one map keyed by the `user` each entry describes, so a
+  // card can never end up showing the other side's numbers.
+  const sides = useMemo(() => indexSides(entries), [entries]);
+
   const forkable = canFork(match.status);
+
+  // Both agents' recorded turns, for the heading above the two panels. Each
+  // panel groups its own side's events, so the two lengths add up.
+  const turnCount = prisonerTurns.length + wardenTurns.length;
 
   return (
     <main>
       <MatchMasthead
         eyebrow={`Recorded match / transcript / ${match.id.slice(0, 8)}`}
-        title={challenge?.name ?? "Match details"}
+        title={
+          overview?.match.challenge_name ??
+          match.challenge_name ??
+          "Match details"
+        }
         status={
           <Link
             to="/matches"
@@ -128,53 +152,43 @@ export function MatchDetails({ match }: { match: MatchListSchema }) {
           { label: "Match ID", value: match.id },
         ]}
         error={
-          challengeQuery.isError ? (
+          summaryQuery.isError ? (
             <p className="match-error">
-              Failed to load challenge:{" "}
-              {(challengeQuery.error as Error).message}
+              Failed to load match stats:{" "}
+              {(summaryQuery.error as Error).message}
             </p>
           ) : undefined
         }
       />
 
-      {challenge !== null && (
+      {overview !== null && (
         <section className="challenge-detail-band">
           <div className="page-wrap">
-            <div className="challenge-detail-top">
-              <span>
-                Type / <strong>{challenge.challenge_type}</strong>
-              </span>
-              <span>
-                {formatModel(match.prisoner_provider, match.prisoner_model)} vs{" "}
-                {formatModel(match.warden_provider, match.warden_model)}
-              </span>
-            </div>
-
-            <div className="challenge-detail-grid">
-              <div>
-                <Field label="DESCRIPTION">
-                  <p className="text-muted-foreground">
-                    {challenge.description}
-                  </p>
-                </Field>
-                <Field label="WIN_CONDITION">
-                  <p>{challenge.win_condition}</p>
-                </Field>
-                <Field label="FLAG_STRUCTURE">
-                  <JsonBlock value={challenge.flag_structure} />
-                </Field>
-                <Field label="FLAG (EXPECTED ANSWER)">
-                  <JsonBlock value={challenge.flag} />
-                </Field>
-              </div>
-              <div>
-                <Field label={`FILES (${Object.keys(challenge.files).length})`}>
-                  <FileBlocks files={challenge.files} />
-                </Field>
-              </div>
-            </div>
+            <Field label="DESCRIPTION">
+              <p className="text-muted-foreground">
+                {overview.match.challenge_description ?? "—"}
+              </p>
+            </Field>
+            <Field label="WIN_CONDITION">
+              <p>{overview.match.win_condition}</p>
+            </Field>
           </div>
         </section>
+      )}
+
+      {summaryQuery.isPending && (
+        <p className="loading-line page-wrap py-10">
+          Counting what each side spent...
+        </p>
+      )}
+
+      {overview !== null && (
+        <MatchStats
+          matchId={match.id}
+          match={overview.match}
+          sides={sides}
+          triggeredTrapTools={overview.triggered_trap_tools}
+        />
       )}
 
       {eventsQuery.isPending && (
@@ -189,6 +203,13 @@ export function MatchDetails({ match }: { match: MatchListSchema }) {
 
       {!eventsQuery.isPending && !eventsQuery.isError && (
         <section className="page-wrap event-section">
+          <div className="agent-heading">
+            <h2>Moves</h2>
+            <span className="mono-label">
+              {turnCount} {turnCount === 1 ? "turn" : "turns"} recorded
+            </span>
+          </div>
+
           <div className="event-grid">
             <EventBox
               title="PRISONER_AGENT"
@@ -401,6 +422,22 @@ function describePersistedEvent(event: MatchEventSchema): DescribedLine {
         detail: null,
       };
   }
+}
+
+/**
+ * Index the summary entries by the side each one describes.
+ *
+ * The list is ordered Prisoner first, but keying off each entry's own `user`
+ * means the cards stay correct whatever order they arrive in, and a side the
+ * backend did not summarise is simply absent rather than mislabelled.
+ */
+function indexSides(
+  entries: MatchSummaryResponse[],
+): Record<string, MatchSummaryResponse | undefined> {
+  if (entries.length === 0) return NO_SIDES;
+  const sides: Record<string, MatchSummaryResponse | undefined> = {};
+  for (const entry of entries) sides[entry.user] = entry;
+  return sides;
 }
 
 function stringValue(value: unknown): string | null {
