@@ -143,16 +143,19 @@ export async function verifyModel(
 export async function startMatch(
   payload: StartMatchRequest,
 ): Promise<StartMatchResponse> {
-  return request<StartMatchResponse>("/api/v1/matches/start-match", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(
-      await encryptApiKeyFields(payload, [
-        "prisoner_api_key",
-        "warden_api_key",
-      ]),
-    ),
-  });
+  const { body, secrets } = await encryptApiKeyFields(payload, [
+    "prisoner_api_key",
+    "warden_api_key",
+  ]);
+  return request<StartMatchResponse>(
+    "/api/v1/matches/start-match",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+    secrets,
+  );
 }
 
 /**
@@ -211,16 +214,19 @@ export function getFork(forkId: string): Promise<ForkDetailSchema> {
 export async function startFromFork(
   payload: StartForkMatchRequest,
 ): Promise<StartMatchResponse> {
-  return request<StartMatchResponse>("/api/v1/matches/start-from-fork", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(
-      await encryptApiKeyFields(payload, [
-        "prisoner_api_key",
-        "warden_api_key",
-      ]),
-    ),
-  });
+  const { body, secrets } = await encryptApiKeyFields(payload, [
+    "prisoner_api_key",
+    "warden_api_key",
+  ]);
+  return request<StartMatchResponse>(
+    "/api/v1/matches/start-from-fork",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+    secrets,
+  );
 }
 
 /**

@@ -119,6 +119,8 @@ export async function encryptApiKeyFields<T extends Record<string, unknown>>(
     }),
   );
 
+  // Only `body` is ever sent. `secrets` stays in this module's caller so a server
+  // error quoting the request back cannot echo a key — see `redactSecrets`.
   return { body: encrypted as T, secrets };
 }
 
