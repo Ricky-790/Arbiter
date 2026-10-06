@@ -123,6 +123,20 @@ Use truncation/redaction before recording arbitrary output.
 
 Never treat telemetry as a trusted source of match truth.
 
+### Leave Logfire's scrubber alone
+
+`logfire.configure` is called with **no** `scrubbing` override, so Logfire's
+default patterns (`password`, `secret`, `api[._ -]?key`, and more) stay active.
+That default is a safety net, and it is easy to disable by accident:
+`ScrubbingOptions.callback` is consulted for each match, and whatever it returns
+*replaces* the matched value — so a callback returning `m.value` replaces the
+match with itself and silently turns the whole default off. An earlier
+`scrubbing_callback` here did exactly that.
+
+Customise only by adding `extra_patterns`, or by redacting *further*: a callback
+may return `None` (drop the match) or a replacement such as `"[redacted]"`.
+Never return the matched value. `tests/test_observability.py` guards this.
+
 ## Large outputs
 
 Do not send unlimited sandbox output to Logfire.

@@ -18,6 +18,11 @@
 #   NVIDIA_API_KEY, OPENROUTER_API_KEY, GOOGLE_API_KEY
 #                           keys for the free models
 #   ARBITER_BYOK_SECRET     encrypts user-supplied keys between API and worker
+#   ARBITER_RSA_PUBLIC_KEY, ARBITER_RSA_PRIVATE_KEY
+#                           decrypts the api-key fields a browser encrypted.
+#                           Only this service needs them: the workers never see
+#                           a browser request. Empty means the transport is off
+#                           and those fields are read as plaintext.
 #   LOGFIRE_TOKEN           observability; the worker reads it at import
 #
 # Build from this directory:  docker build -t arbiter-backend backend/

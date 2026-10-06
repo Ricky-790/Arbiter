@@ -392,3 +392,23 @@ class MatchSummaryResponse(BaseModel):
     #: The opening message that side was given, when its conversation is stored.
     #: Carries the challenge's role hint as well as the strategy.
     briefing: AgentBriefing | None = None
+
+
+class PublicKeyResponse(BaseModel):
+    """The deployment's public key, for encrypting api-key fields in a browser.
+
+    ``public_key_jwk`` is the one to use from a browser: WebCrypto's
+    ``crypto.subtle.importKey`` takes a JWK as it is, while a PEM has to be
+    stripped of its armour and base64-decoded to DER first. ``public_key_pem``
+    is here for a non-browser caller.
+
+    The browser encrypts the ``*_api_key`` fields of its next request with this
+    key and sends the base64 ciphertext in the same field. Only those fields
+    are decrypted by the server; the rest of the body is untouched.
+    """
+
+    #: WebCrypto parameters: ``{ name: algorithm, hash: hash_algorithm }``.
+    algorithm: str
+    hash_algorithm: str
+    public_key_jwk: dict[str, Any]
+    public_key_pem: str

@@ -5,6 +5,11 @@
  * backend, so the app works out of the box without an `.env`.
  */
 
+import {
+  encryptApiKeyFields,
+  redactSecrets,
+  resetApiKeyTransport,
+} from "@/lib/crypto";
 import type {
   AvailableModelsResponse,
   ChallengeSchema,
@@ -56,10 +61,24 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+async function request<T>(
+  path: string,
+  init?: RequestInit,
+  /** Plaintext api keys this request carried, scrubbed out of its error text. */
+  secrets: readonly string[] = [],
+): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, init);
   if (!response.ok) {
-    throw new ApiError(await errorDetail(response), response.status);
+    if (response.status === 400) {
+      // A 400 on a request carrying an api key is most often a key this
+      // deployment can no longer open — a rotation. Drop the cached public key so
+      // the next attempt encrypts with the current one instead of failing forever.
+      resetApiKeyTransport();
+    }
+    throw new ApiError(
+      redactSecrets(await errorDetail(response), secrets),
+      response.status,
+    );
   }
   return (await response.json()) as T;
 }
@@ -102,27 +121,37 @@ export function listModels(): Promise<AvailableModelsResponse> {
  * key from the page would expose it. The backend makes the call with the key.
  * A model that cannot be confirmed comes back as `exists: false`, not an error.
  */
-export function verifyModel(
+export async function verifyModel(
   payload: ModelCheckRequest,
   signal?: AbortSignal,
 ): Promise<ModelCheckResponse> {
-  return request<ModelCheckResponse>("/api/v1/matches/verify-model", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-    // `RequestInit.signal` is `AbortSignal | null`, not optional here.
-    signal: signal ?? null,
-  });
+  const { body, secrets } = await encryptApiKeyFields(payload, ["api_key"]);
+  return request<ModelCheckResponse>(
+    "/api/v1/matches/verify-model",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      // `RequestInit.signal` is `AbortSignal | null`, not optional here.
+      signal: signal ?? null,
+    },
+    secrets,
+  );
 }
 
 /** `POST /api/v1/matches/start-match` — queue a match, returns its id. */
-export function startMatch(
+export async function startMatch(
   payload: StartMatchRequest,
 ): Promise<StartMatchResponse> {
   return request<StartMatchResponse>("/api/v1/matches/start-match", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(
+      await encryptApiKeyFields(payload, [
+        "prisoner_api_key",
+        "warden_api_key",
+      ]),
+    ),
   });
 }
 
@@ -179,13 +208,18 @@ export function getFork(forkId: string): Promise<ForkDetailSchema> {
  * agent resumes from; the body supplies the models, tips and keys, so the same
  * fork can back any number of experiments.
  */
-export function startFromFork(
+export async function startFromFork(
   payload: StartForkMatchRequest,
 ): Promise<StartMatchResponse> {
   return request<StartMatchResponse>("/api/v1/matches/start-from-fork", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(
+      await encryptApiKeyFields(payload, [
+        "prisoner_api_key",
+        "warden_api_key",
+      ]),
+    ),
   });
 }
 
@@ -489,6 +523,7 @@ export async function streamMatchEvents(
     headers: { Accept: "text/event-stream" },
     signal,
   });
+  // The spectator stream carries no api key, so there is nothing to scrub.
   await consumeEventStream(response, onEvent);
 }
 
@@ -511,25 +546,39 @@ export async function reviewStrategy(
   onEvent: (event: ReviewEvent) => void,
   signal: AbortSignal,
 ): Promise<void> {
+  const { body, secrets } = await encryptApiKeyFields(payload, ["api_key"]);
   const response = await fetch(`${API_BASE_URL}/api/v1/strategies/review`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Accept: "text/event-stream",
     },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(body),
     signal,
   });
-  await consumeEventStream(response, onEvent);
+  if (response.status === 400) {
+    // Same self-heal as `request`: a 400 here is most likely a rotated key.
+    resetApiKeyTransport();
+  }
+  await consumeEventStream(response, onEvent, secrets);
 }
 
-/** Read one SSE response to its end, handing each frame to `onEvent`. */
+/**
+ * Read one SSE response to its end, handing each frame to `onEvent`.
+ *
+ * `secrets` are any plaintext api keys the request carried, so a failure before
+ * the stream opens cannot report one back in its message.
+ */
 async function consumeEventStream<T>(
   response: Response,
   onEvent: (event: T) => void,
+  secrets: readonly string[] = [],
 ): Promise<void> {
   if (!response.ok) {
-    throw new ApiError(await errorDetail(response), response.status);
+    throw new ApiError(
+      redactSecrets(await errorDetail(response), secrets),
+      response.status,
+    );
   }
   if (response.body === null) {
     throw new ApiError("Stream has no body", response.status);

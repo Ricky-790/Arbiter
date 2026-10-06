@@ -141,6 +141,7 @@ source = { editable = "." }
 dependencies = [
     { name = "alembic" },
     { name = "celery", extra = ["redis"] },
+    { name = "cryptography" },
     { name = "e2b" },
     { name = "fastapi", extra = ["standard"] },
     { name = "logfire", extra = ["system-metrics"] },
@@ -161,6 +162,7 @@ dependencies = [
 requires-dist = [
     { name = "alembic", specifier = ">=1.20.0" },
     { name = "celery", extras = ["redis"], specifier = ">=5.4" },
+    { name = "cryptography", specifier = ">=43.0.0" },
     { name = "e2b", specifier = ">=2.51.0" },
     { name = "fastapi", extras = ["standard"], specifier = ">=0.141.1" },
     { name = "logfire", extras = ["system-metrics"], specifier = ">=4.41.0" },

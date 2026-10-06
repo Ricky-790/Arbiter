@@ -7,13 +7,17 @@ rather than model-supplied, and what the endpoint streams.
 """
 
 import asyncio
+import base64
 import json
+import os
 import unittest
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
 from fastapi import HTTPException
 
 from app.agents.models import AgentType
@@ -42,6 +46,44 @@ from app.reviewer.models import (
 
 MATCH_ID = uuid4()
 CHALLENGE_ID = uuid4()
+
+
+def _generate_keys() -> tuple[bytes, bytes]:
+    """A throwaway pair, used the way the browser uses the published one."""
+    from app.secrets.gen_rsa_keys import generate
+
+    return generate(2048)
+
+
+def _env_pair(public_pem: bytes, private_pem: bytes) -> dict[str, str]:
+    return {
+        "ARBITER_RSA_PUBLIC_KEY": base64.b64encode(public_pem).decode(),
+        "ARBITER_RSA_PRIVATE_KEY": base64.b64encode(private_pem).decode(),
+    }
+
+
+def _encrypt(public_pem: bytes, plaintext: str) -> str:
+    """What the browser sends in an api-key field."""
+    key = serialization.load_pem_public_key(public_pem)
+    ciphertext = key.encrypt(
+        plaintext.encode("utf-8"),
+        padding.OAEP(
+            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=None,
+        ),
+    )
+    return base64.b64encode(ciphertext).decode("ascii")
+
+
+class _ReviewerStub:
+    """An agent that never runs: these tests stop before the stream is read."""
+
+    def __init__(self, **kwargs: object) -> None:
+        pass
+
+    async def run_turn(self) -> str:
+        return "better strategy"
 
 
 def page(items: list) -> Page:
@@ -598,6 +640,54 @@ class ReviewStreamTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(raised.exception.status_code, 400)
+
+    async def test_a_browser_encrypted_key_is_decrypted_before_use(self) -> None:
+        """The reviewer's key is one of the api-key fields the transport covers.
+
+        Without this the ciphertext would go to the provider as the credential
+        and the review would fail with a rejection that explains nothing.
+        """
+        public_pem, private_pem = _generate_keys()
+        check = AsyncMock()
+        with (
+            patch.dict(os.environ, _env_pair(public_pem, private_pem)),
+            patch.object(routes, "check_model_exists", check),
+            patch.object(
+                strategies_service,
+                "get_strategy_row",
+                AsyncMock(return_value=self.strategy()),
+            ),
+            patch.object(
+                matches_service, "get_match", AsyncMock(return_value=self.match())
+            ),
+            patch.object(routes, "StrategyReviewerAgent", _ReviewerStub),
+        ):
+            await routes.review_strategy(
+                self.payload(api_key=_encrypt(public_pem, "sk-encrypted")),
+                session=self.fake_session(),
+            )
+
+        check.assert_awaited_once_with("openai", "gpt-4o-mini", "sk-encrypted")
+
+    async def test_a_key_that_cannot_be_decrypted_is_rejected(self) -> None:
+        """Two independent pairs: the server holds one, the browser used the other."""
+        public_pem, private_pem = _generate_keys()
+        other_public, _other_private = _generate_keys()
+        check = AsyncMock()
+        with (
+            patch.dict(os.environ, _env_pair(public_pem, private_pem)),
+            patch.object(routes, "check_model_exists", check),
+            self.assertRaises(HTTPException) as raised,
+        ):
+            await routes.review_strategy(
+                self.payload(api_key=_encrypt(other_public, "sk-stale")),
+                session=self.fake_session(),
+            )
+
+        self.assertEqual(raised.exception.status_code, 400)
+        self.assertIn("api_key", raised.exception.detail)
+        # Refused before anything reached the provider.
+        check.assert_not_awaited()
 
 
 class ReviewerAgentWiringTests(unittest.IsolatedAsyncioTestCase):

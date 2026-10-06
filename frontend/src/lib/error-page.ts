@@ -22,7 +22,7 @@ export function renderErrorPage(): string {
   <body>
     <div class="card">
       <p class="code">ERR</p>
-      <h1>The arena dropped a connection.</h1>
+      <h1>The arena dropped the connection.</h1>
       <p>Something went wrong while loading this page. You can try the room again or return to the front desk.</p>
       <div class="actions">
         <button class="primary" onclick="location.reload()">Try again</button>

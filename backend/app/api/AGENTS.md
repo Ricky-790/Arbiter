@@ -12,7 +12,13 @@ When expanding the API, treat it as an adapter around application/domain service
 - Keep route handlers thin.
 - Do not duplicate Engine authorization logic.
 - Do not let HTTP concerns leak into Engine/Sandbox/Tools.
-- Do not expose secrets in responses or logs.
+- Do not expose secrets in responses or logs. A credential field is any body
+  field named `api_key` or `*_api_key`: FastAPI echoes the offending input in a
+  422, so `is_secret_body_field` decides what `scrub_secret_validation_errors`
+  drops. Match on the name pattern, never a hand-written list of the field names
+  in use today — the list this replaced covered `prisoner_api_key` and
+  `warden_api_key` and silently missed the plain `api_key` on `verify-model` and
+  the strategy review.
 - Match results must come from server-side Engine state.
 
 ## Health
@@ -32,6 +38,31 @@ reachable is a readiness concern and belongs at its own endpoint.
 
 The worker pools answer the same question from `worker_health.py`, which binds
 their `$PORT` and reports which pool replied.
+
+## Encrypted api-key fields
+
+A browser encrypts every `*_api_key` field before sending it, so a provider key
+is never in a request body in plaintext. `GET /api/v1/crypto/public-key`
+(`routes/crypto.py`) publishes the key to do it with, as both a JWK and a PEM;
+the JWK is the one to use, because WebCrypto imports it directly while a PEM
+must be un-armoured and base64-decoded to DER first. RSA-OAEP with SHA-256, and
+the response names both so a client does not have to guess.
+
+A 503 from that endpoint means the deployment has not configured the keys, not
+that it is down, and a client that sees it should send plaintext, which the
+server still accepts.
+
+On the way in, `app/api/api_keys.py:decrypt_api_key` is the **only** place a
+field is decrypted. Every route that reads a key calls it — `_resolve_side`
+(which gates both start routes), `verify-model`, and the strategy review — so
+"decrypt only the api-key fields" is enforced by the code path rather than by
+remembering to. Nothing else in a body is ever passed to the decryptor.
+
+A plaintext field passes through unchanged, which is what keeps existing
+callers working. A field that is the shape of this deployment's ciphertext but
+does not open is a 400 naming the field; that is a rotated key or another
+deployment's public key, and passing it to the provider would report the real
+problem as a bad credential. See `app/secrets/AGENTS.md` for the full contract.
 
 ## Model selection and BYOK keys
 

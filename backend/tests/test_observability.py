@@ -373,3 +373,37 @@ class ObservabilityTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ScrubbingConfigurationTests(unittest.TestCase):
+    """Telemetry must never carry a credential, so the scrubber stays on.
+
+    Logfire's default patterns include ``password``, ``secret`` and
+    ``api[._ -]?key``. Its ``ScrubbingOptions.callback`` is consulted for each
+    match and a value returned from it *replaces* the match -- so a callback
+    that returns the matched value unchanged replaces it with itself and turns
+    the whole default off. This is a regression guard for exactly that.
+    """
+
+    def test_the_default_secret_scrubber_is_left_alone(self) -> None:
+        from unittest.mock import patch
+
+        from app.observability import logfire as observability
+
+        with (
+            patch.object(observability.logfire, "configure") as configure,
+            patch.object(observability.logfire, "instrument_pydantic_ai"),
+        ):
+            observability.configure_observability()
+
+        options = configure.call_args.kwargs.get("scrubbing")
+        self.assertTrue(
+            options is None or options.callback is None,
+            "a scrubbing callback was installed; if it returns the matched "
+            "value it silently disables the default secret scrubbing",
+        )
+
+    def test_the_module_no_longer_defines_a_pass_through_callback(self) -> None:
+        from app.observability import logfire as observability
+
+        self.assertFalse(hasattr(observability, "scrubbing_callback"))

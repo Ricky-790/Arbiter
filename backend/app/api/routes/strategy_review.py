@@ -39,6 +39,7 @@ from app.agents.agents_directory import (
 from app.agents.strategy_reviewer import ReviewRequest, StrategyReviewerAgent
 from app.agents.tools.review_tools import ReviewContext
 from app.api import sse
+from app.api.api_keys import decrypt_api_key
 from app.api.schemas.dto_models import (
     MatchSide,
     MatchSummaryResponse,
@@ -567,7 +568,7 @@ async def review_strategy(
                 "are listed by GET /api/v1/matches/models"
             ),
         )
-    api_key = payload.api_key.get_secret_value().strip() if payload.api_key else ""
+    api_key = (decrypt_api_key(payload.api_key, field="api_key") or "").strip()
     if not api_key:
         raise HTTPException(
             status_code=400,

@@ -10,7 +10,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from .routes import challenges, health, matches, strategy_review
+from .routes import challenges, crypto, health, matches, strategy_review
 
 load_dotenv()
 
@@ -31,14 +31,27 @@ LOCALHOST_ORIGIN_REGEX = r"http://(localhost|127\.0\.0\.1)(:\d+)?"
 #: Body fields carrying a credential. FastAPI echoes the offending input back
 #: in a 422, which for these would put the secret in a response body (and in
 #: whatever logs it), so their value is never included.
-SECRET_BODY_FIELDS = frozenset({"prisoner_api_key", "warden_api_key"})
+#:
+#: Matched by name pattern rather than by an explicit list: the request models
+#: name the field ``prisoner_api_key`` / ``warden_api_key`` on the start routes
+#: and plain ``api_key`` on ``verify-model`` and the strategy review, and a
+#: hard-coded set covering only the first two silently left the third echoed.
+#: Any future ``<something>_api_key`` is covered by the same rule.
+SECRET_FIELD_SUFFIX = "api_key"
+
+
+def is_secret_body_field(name: object) -> bool:
+    """Whether one ``loc`` entry names a field carrying a credential."""
+    return isinstance(name, str) and (
+        name == SECRET_FIELD_SUFFIX or name.endswith(f"_{SECRET_FIELD_SUFFIX}")
+    )
 
 
 def scrub_secret_validation_errors(errors: list[dict]) -> list[dict]:
     """Drop the echoed value from validation errors on a credential field."""
     scrubbed: list[dict] = []
     for error in errors:
-        if any(field in error.get("loc", ()) for field in SECRET_BODY_FIELDS):
+        if any(is_secret_body_field(field) for field in error.get("loc", ())):
             error = {k: v for k, v in error.items() if k not in {"input", "ctx"}}
         scrubbed.append(error)
     return scrubbed
@@ -73,6 +86,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(health.router)
+app.include_router(crypto.router)
 app.include_router(challenges.router)
 app.include_router(matches.router)
 app.include_router(strategy_review.strategies_router)

@@ -21,6 +21,7 @@ from app.agents.agents_directory import (
     models_for,
 )
 from app.api import sse
+from app.api.api_keys import decrypt_api_key
 from app.api.schemas.dto_models import (
     AvailableModelsResponse,
     ForkDetailSchema,
@@ -203,25 +204,34 @@ async def start_match(
         await store_api_key(match_id, PRISONER, prisoner_key)
         await store_api_key(match_id, WARDEN, warden_key)
     except ByokStoreError as error:
+        # The first side may already have landed when the second failed, and no
+        # match row exists to ever redeem it, so take both back now rather than
+        # leaving a credential in Redis for the TTL.
+        await _discard_byok_keys(match_id)
         logger.error(f"Provider key store unavailable: {error}")
         raise HTTPException(
             status_code=503, detail="Provider key storage is unavailable"
         ) from error
 
-    await matches_service.create_queued_match(
-        session,
-        match_id=match_id,
-        challenge_id=payload.challenge_id,
-        prisoner_model=payload.prisoner_model,
-        prisoner_provider=payload.prisoner_provider,
-        warden_model=payload.warden_model,
-        warden_provider=payload.warden_provider,
-        win_condition=challenge.win_condition,
-        strategy=strategy,
-        strategy_id=_named_strategy_ids(
-            payload.prisoner_strategy_id, payload.warden_strategy_id
-        ),
-    )
+    try:
+        await matches_service.create_queued_match(
+            session,
+            match_id=match_id,
+            challenge_id=payload.challenge_id,
+            prisoner_model=payload.prisoner_model,
+            prisoner_provider=payload.prisoner_provider,
+            warden_model=payload.warden_model,
+            warden_provider=payload.warden_provider,
+            win_condition=challenge.win_condition,
+            strategy=strategy,
+            strategy_id=_named_strategy_ids(
+                payload.prisoner_strategy_id, payload.warden_strategy_id
+            ),
+        )
+    except Exception:
+        # No row was written, so nothing will ever redeem these keys.
+        await _discard_byok_keys(match_id)
+        raise
 
     message = MatchStartMessage(
         match_id=match_id,
@@ -464,28 +474,35 @@ async def start_from_fork(
         await store_api_key(match_id, PRISONER, prisoner_key)
         await store_api_key(match_id, WARDEN, warden_key)
     except ByokStoreError as error:
+        # Same as the start route: a half-stored pair has no match to redeem it.
+        await _discard_byok_keys(match_id)
         logger.error(f"Provider key store unavailable: {error}")
         raise HTTPException(
             status_code=503, detail="Provider key storage is unavailable"
         ) from error
 
-    await matches_service.create_queued_match(
-        session,
-        match_id=match_id,
-        challenge_id=parent.challenge_id,
-        prisoner_model=payload.prisoner_model,
-        prisoner_provider=payload.prisoner_provider,
-        warden_model=payload.warden_model,
-        warden_provider=payload.warden_provider,
-        win_condition=parent.win_condition,
-        strategy=strategy,
-        strategy_id=_named_strategy_ids(
-            payload.prisoner_strategy_id, payload.warden_strategy_id
-        ),
-        # The fork's own branch point, so the match worker knows what to resume.
-        parent_match_id=fork.parent_match_id,
-        branch_event_id=fork.branch_event_id,
-    )
+    try:
+        await matches_service.create_queued_match(
+            session,
+            match_id=match_id,
+            challenge_id=parent.challenge_id,
+            prisoner_model=payload.prisoner_model,
+            prisoner_provider=payload.prisoner_provider,
+            warden_model=payload.warden_model,
+            warden_provider=payload.warden_provider,
+            win_condition=parent.win_condition,
+            strategy=strategy,
+            strategy_id=_named_strategy_ids(
+                payload.prisoner_strategy_id, payload.warden_strategy_id
+            ),
+            # The fork's own branch point, so the match worker knows what to resume.
+            parent_match_id=fork.parent_match_id,
+            branch_event_id=fork.branch_event_id,
+        )
+    except Exception:
+        # No row was written, so nothing will ever redeem these keys.
+        await _discard_byok_keys(match_id)
+        raise
 
     message = MatchStartMessage(
         match_id=match_id,
@@ -523,7 +540,7 @@ async def verify_model(payload: ModelCheckRequest) -> ModelCheckResponse:
     A model that cannot be confirmed is reported as ``exists: false`` rather
     than an HTTP error: it is an answer to a question, not a failed request.
     """
-    api_key = payload.api_key.get_secret_value().strip()
+    api_key = (decrypt_api_key(payload.api_key, field="api_key") or "").strip()
     if not api_key:
         return ModelCheckResponse(
             exists=False,
@@ -637,7 +654,7 @@ async def _resolve_side(
                 "providers are listed by GET /api/v1/matches/models"
             ),
         )
-    key = secret.get_secret_value().strip() if secret is not None else ""
+    key = (decrypt_api_key(secret, field=f"{side}_api_key") or "").strip()
     if not key:
         raise HTTPException(
             status_code=400,

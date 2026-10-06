@@ -29,8 +29,6 @@ _current_agent_role: ContextVar[str | None] = ContextVar(
 
 
 # Logfire configuration
-def scrubbing_callback(m: logfire.ScrubMatch):
-    return m.value
 
 
 def configure_observability(
@@ -45,7 +43,13 @@ def configure_observability(
         service_name=service_name,
         service_version=service_version or os.getenv("SERVICE_VERSION"),
         environment=environment or os.getenv("DEPLOYMENT_ENVIRONMENT", "dev"),
-        scrubbing=logfire.ScrubbingOptions(callback=scrubbing_callback),
+        # No custom scrubbing callback. Logfire's default patterns include
+        # ``password``, ``secret`` and ``api[._ -]?key``, and a callback that
+        # returns the matched value unchanged replaces it with itself -- which
+        # silently turns that default off. Telemetry must never carry an API
+        # key (see this package's AGENTS.md), so the default is the safe one.
+        # Customise only by adding patterns or redacting further, never by
+        # returning the value.
     )
 
     logfire.instrument_pydantic_ai(include_content=True)

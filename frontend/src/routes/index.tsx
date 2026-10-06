@@ -10,7 +10,6 @@ import {
 import type { ReactNode } from "react";
 
 import { Eyebrow } from "@/components/arbiter/app-shell";
-
 export const Route = createFileRoute("/")({
   head: () => ({
     meta: [

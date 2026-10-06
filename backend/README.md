@@ -8,6 +8,40 @@ uv sync
 uv run alembic upgrade head
 ```
 
+## Encrypted api-key fields
+
+The browser encrypts each `*_api_key` field before sending it, using a public
+key the API publishes at `GET /api/v1/crypto/public-key`. Generate the pair once
+per deployment and put both values in the server's environment:
+
+```bash
+uv run python -m app.secrets.gen_rsa_keys
+```
+
+It prints two ready-to-paste lines:
+
+```
+ARBITER_RSA_PUBLIC_KEY=<base64 of the public PEM>
+ARBITER_RSA_PRIVATE_KEY=<base64 of the private PEM>
+```
+
+Base64 is the default because a PEM has newlines; `--pem` prints the text
+instead if your environment prefers it. Both forms load, and setting only the
+private key is enough — the public half is derived from it. `--bits` (2048 by
+default) sizes the modulus; RSA-OAEP with SHA-256 leaves room for a 190-byte
+payload at 2048 and 446 at 4096, either of which fits a provider key.
+
+**Keep the private value secret.** It is the deployment's decryption key, so
+anywhere it is read by someone else — a shell history, a ticket, a build log —
+the transport is compromised. Rotating it is safe: a browser holding the old
+public key gets a 400 telling it to re-fetch, and nothing already stored is
+affected.
+
+With neither value set the transport is simply **off**: the endpoint returns
+503, and api-key fields are taken as plaintext exactly as before. That is what
+keeps the `curl` examples below working, so the encryption can be adopted by the
+frontend without a coordinated backend change.
+
 ## Seed challenges
 
 Loads the three starter scenarios (The Secret File, Unlock the Configuration,

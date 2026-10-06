@@ -470,6 +470,23 @@ export type ReviewEvent = {
   detail?: string;
 };
 
+/**
+ * `PublicKeyResponse` — the deployment's key for encrypting api-key fields.
+ *
+ * `public_key_jwk` is the one a browser uses: WebCrypto's `importKey` takes a
+ * JWK as it is, while the PEM would have to be stripped of its armour and
+ * base64-decoded to DER first. `algorithm` and `hash_algorithm` are the WebCrypto
+ * parameters to import it under. A 503 means the deployment has not configured
+ * the transport, and api-key fields are then sent as plaintext, which the server
+ * still accepts.
+ */
+export type PublicKeyResponse = {
+  algorithm: string;
+  hash_algorithm: string;
+  public_key_jwk: JsonObject;
+  public_key_pem: string;
+};
+
 /** `PaginationMeta` — paging envelope shared by list responses. */
 export type PaginationMeta = {
   page: number;
