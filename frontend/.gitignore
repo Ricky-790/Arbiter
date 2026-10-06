@@ -9,6 +9,9 @@ dist
 .tanstack
 *.tgz
 
+# vercel (build output, plus the linked project/org ids)
+.vercel
+
 # code coverage
 coverage
 *.lcov
