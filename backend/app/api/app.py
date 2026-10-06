@@ -93,4 +93,4 @@ app.include_router(matches.router)
 app.include_router(strategy_review.strategies_router)
 app.include_router(strategy_review.reviewer_router)
 
-print(allowed_origins())
+# print(allowed_origins())
