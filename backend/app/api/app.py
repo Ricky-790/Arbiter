@@ -60,8 +60,9 @@ def scrub_secret_validation_errors(errors: list[dict]) -> list[dict]:
 def allowed_origins() -> list[str]:
     """Explicit CORS origins from the environment, else the dev defaults."""
     raw = os.getenv("CORS_ALLOW_ORIGINS", "")
-    configured = [origin.strip() for origin in raw.split(".") if origin.strip()]
-    return configured or list(DEFAULT_CORS_ORIGINS)
+    # configured = [origin.strip() for origin in raw.split(".") if origin.strip()]
+    # return configured or list(DEFAULT_CORS_ORIGINS)
+    return [raw] if raw else list(DEFAULT_CORS_ORIGINS)
 
 
 app = FastAPI(title="Arbiter")
@@ -73,14 +74,14 @@ async def validation_error_handler(
 ) -> JSONResponse:
     """Return the standard 422 with credential values removed."""
     return JSONResponse(
-        status_code=422, content={"detail": scrub_secret_validation_errors(exc.errors())}
+        status_code=422,
+        content={"detail": scrub_secret_validation_errors(exc.errors())},
     )
 
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins(),
-    allow_origin_regex=LOCALHOST_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -91,3 +92,5 @@ app.include_router(challenges.router)
 app.include_router(matches.router)
 app.include_router(strategy_review.strategies_router)
 app.include_router(strategy_review.reviewer_router)
+
+print(allowed_origins())
