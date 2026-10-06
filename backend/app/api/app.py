@@ -60,7 +60,7 @@ def scrub_secret_validation_errors(errors: list[dict]) -> list[dict]:
 def allowed_origins() -> list[str]:
     """Explicit CORS origins from the environment, else the dev defaults."""
     raw = os.getenv("CORS_ALLOW_ORIGINS", "")
-    configured = [origin.strip() for origin in raw.split(",") if origin.strip()]
+    configured = [origin.strip() for origin in raw.split(".") if origin.strip()]
     return configured or list(DEFAULT_CORS_ORIGINS)
 
 
