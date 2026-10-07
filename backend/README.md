@@ -1,18 +1,119 @@
 # Arbiter Backend
 
+## Requirements
+
+- Python 3.12 (pinned in `.python-version`) and [uv](https://docs.astral.sh/uv/)
+- Docker, for Postgres and Redis
+- A sandbox provider key: `E2B_API_KEY` 
+
 ## Setup
 
 ```bash
-cp .env.example .env   # fill in model/Solari keys
+cp .env.example .env   # fill in api keys after
 uv sync
-uv run alembic upgrade head
+source .venv/bin/activate
 ```
+
+### Postgres and Redis
+
+Both run in Docker.
+
+```bash
+docker run -d --name arbiter-postgres \
+    -e POSTGRES_PASSWORD=password \
+    -p 5432:5432 postgres:16
+
+docker run -d --name arbiter-redis \
+    -p 6379:6379 redis:7-alpine
+```
+
+To stop them:
+
+```bash
+docker stop arbiter-postgres arbiter-redis
+```
+
+### Migrations
+
+Alembic lives in `app/db/`, so cd into it before running alembic commands.
+
+```bash
+uv run alembic -c app/db/alembic.ini upgrade head
+```
+
+The connection string is read from `DATABASE_URL` at migration time.
+
+### Seed the challenges
+
+Loads the three starter scenarios (The Hidden Artifact, Unlock the Configuration,
+Stop the Background Task). It upserts on fixed ids, so re-running updates the
+rows in place rather than duplicating them.
+
+```bash
+uv run python -m app.db.scripts.seed_challenges
+```
+
+## Run
+
+Three processes. The API serves HTTP; the workers host matches.
+
+API:
+
+```bash
+uv run uvicorn app.api.app:app --reload
+```
+
+Match worker runs one match at a time for now, so keep concurrency at 1:
+
+```bash
+uv run celery -A app.workers.celery_app worker \
+    --queues=arbiter.matches --concurrency=1 --loglevel=INFO
+```
+
+Fork worker — a second pool on its own queue, only if you are building forks. It
+never starts a match, and a deployment that does not use forks does not need it
+running:
+
+```bash
+uv run celery -A app.workers.celery_app worker \
+    --queues=arbiter.forks --concurrency=1 --loglevel=INFO
+```
+
+Restart *both* workers any changes in code.
+
+## Optional: Logfire tracing
+
+Off by default. Nothing is exported unless you ask for it, and no Logfire
+credentials are needed in that case:
+
+```bash
+ENABLE_LOGFIRE_TRACING=0
+```
+
+Set it to `1` and add a write token to export traces:
+
+```bash
+ENABLE_LOGFIRE_TRACING=1
+LOGFIRE_TOKEN=pylf_v1_...
+```
+
+Traces are one match per trace, with `match_*` spans for agent and tool calls and
+`arbiter.*` attributes linking them to the match and the acting side. API keys
+are never recorded, and Logfire's default secret scrubbing is left in place.
+
+**A token is required when tracing is on.** With `ENABLE_LOGFIRE_TRACING=1` and no
+`LOGFIRE_TOKEN`, Logfire falls back to an interactive prompt for credentials,
+which fails with `EOFError` anywhere there is no terminal — a container, a cron
+job, a CI run. Either set a token or leave the flag at `0`.
+
+Span output still prints to stdout/stderr regardless of the flag, so container
+logs keep their traces either way.
 
 ## Encrypted api-key fields
 
-The browser encrypts each `*_api_key` field before sending it, using a public
-key the API publishes at `GET /api/v1/crypto/public-key`. Generate the pair once
-per deployment and put both values in the server's environment:
+The browser encrypts each `*_api_key` field before sending it, using a public key
+the API publishes at `GET /api/v1/crypto/public-key`. Generate the pair once per
+deployment and put both values in the server's environment:
 
 ```bash
 uv run python -m app.secrets.gen_rsa_keys
@@ -32,151 +133,20 @@ default) sizes the modulus; RSA-OAEP with SHA-256 leaves room for a 190-byte
 payload at 2048 and 446 at 4096, either of which fits a provider key.
 
 **Keep the private value secret.** It is the deployment's decryption key, so
-anywhere it is read by someone else — a shell history, a ticket, a build log —
-the transport is compromised. Rotating it is safe: a browser holding the old
-public key gets a 400 telling it to re-fetch, and nothing already stored is
-affected.
+anywhere it is read by someone else — a shell history, a ticket, a build log — the
+transport is compromised. Rotating it is safe: a browser holding the old public
+key gets a 400 telling it to re-fetch, and nothing already stored is affected.
 
-With neither value set the transport is simply **off**: the endpoint returns
-503, and api-key fields are taken as plaintext exactly as before. That is what
-keeps the `curl` examples below working, so the encryption can be adopted by the
+With neither value set the transport is simply **off**: the endpoint returns 503,
+and api-key fields are taken as plaintext exactly as before. That is what keeps
+the `curl` examples below working, so the encryption can be adopted by the
 frontend without a coordinated backend change.
 
-## Seed challenges
-
-Loads the three starter scenarios (The Secret File, Unlock the Configuration,
-Stop the Target Process). It is idempotent — fixed ids, so re-running updates
-the rows in place:
+## Tests
 
 ```bash
-uv run python -m app.db.scripts.seed_challenges
+uv run pytest tests/ -q
 ```
 
-## Run
-
-Redis is both the Celery broker and the live match-event bus:
-
-```bash
-docker run -d --rm --name arbiter-redis -p 6379:6379 redis:7-alpine
-```
-
-API:
-
-```bash
-uv run uvicorn app.api.app:app --reload
-```
-
-Match worker (V1 runs one match at a time — keep concurrency at 1):
-
-```bash
-uv run celery -A app.workers.celery_app worker \
-    --queues=arbiter.matches --concurrency=1 --loglevel=INFO
-```
-
-Fork worker — a second pool on its own queue, only if you are building forks.
-It never starts a match, and a deployment that does not use forks does not need
-it running:
-
-```bash
-uv run celery -A app.workers.celery_app worker \
-    --queues=arbiter.forks --concurrency=1 --loglevel=INFO
-```
-
-Celery does **not** auto-reload. Unlike the API (`--reload`), these processes
-keep the code they started with, so every change under `app/engine/`,
-`app/agents/` or `app/sandbox/` -- match rules, setup commands, prompts, tool
-descriptions -- needs a worker restart before the next match. A match run
-against a stale worker silently enforces the old rules: the giveaway is a tool
-result quoting an error string that no longer exists in the source. Restart
-*both* pools after such a change, or a fork will be rebuilt under the old rules.
-
-## Deploy
-
-Three images, one per process. Each is self-contained — none derives from
-another — so a platform can build whichever service it needs:
-
-| Dockerfile | Process | Queue |
-| --- | --- | --- |
-| `Dockerfile` | API (`alembic upgrade head`, then uvicorn) | — |
-| `Dockerfile.worker` | Match worker | `arbiter.matches` |
-| `Dockerfile.fork-worker` | Fork worker | `arbiter.forks` |
-
-`Dockerfile.worker` and `Dockerfile.fork-worker` differ only in the default
-`CELERY_QUEUES`. If your platform can set a service's environment, deploy the
-fork worker from `Dockerfile.worker` with `CELERY_QUEUES=arbiter.forks` and skip
-the third file.
-
-Point every service's health check at **`/health`**:
-
-| Service | Health check |
-| --- | --- |
-| API | `GET /health` served by FastAPI (`/` answers too) |
-| Match worker | `GET /health` on the worker's `$PORT` |
-| Fork worker | `GET /health` on the worker's `$PORT` |
-
-Both are liveness only — neither touches Postgres nor Redis, so a dependency
-blip cannot fail a deploy or start a restart loop. The workers' body names the
-pool that answered (`arbiter-worker`, `arbiter-fork-worker`), so a check pointed
-at the wrong service is recognisable instead of silently green. The worker
-endpoint answers any path, so a wrong check path cannot fail a deploy either.
-
-The fork worker deliberately does not need the model provider keys or
-`ARBITER_BYOK_SECRET`: replaying recorded tool calls builds no agents, so it has
-no reason to hold a credential it never uses.
-
-Only the API runs migrations. Both workers assume the schema is current, so
-start the API first on a fresh deployment.
-
-## Start and spectate a match
-
-`POST /api/v1/matches/start-match` queues the match and returns a `match_id`
-immediately; the worker hosts it asynchronously.
-
-```bash
-curl -X POST http://localhost:8000/api/v1/matches/start-match \
-  -H 'Content-Type: application/json' \
-  -d '{"challenge_id": "<uuid>", "prisoner_model": "nvidia/glm-5.3", "warden_model": "google/gemini-3.1-flash-lite"}'
-# -> {"match_id": "...", "status": "queued"}
-```
-
-`POST /api/v1/matches/spectate?match_id=...` streams that match's events as
-Server-Sent Events. Every event carries its `match_id`, and the stream ends
-after `match_finished`.
-
-```bash
-curl -N -X POST "http://localhost:8000/api/v1/matches/spectate?match_id=<uuid>"
-```
-
-Note: the spectator route is `POST` as specified, so the browser `EventSource`
-API cannot be used directly — consume it with `fetch()` and a `ReadableStream`,
-or a small SSE client that supports POST. Subscribers only receive events
-published after they subscribe (Redis pub/sub has no replay).
-
-## Match archive
-
-Both list endpoints are paginated (`page`, `page_size`, default 20 / max 100)
-and sorted by date (`sort=date_desc` or `date_asc`).
-
-```bash
-# One page of matches, newest first (default).
-curl "http://localhost:8000/api/v1/matches/?page=1&page_size=20&sort=date_desc"
-
-# One match's persisted events, oldest first (default).
-curl "http://localhost:8000/api/v1/matches/events?match_id=<uuid>&page=1"
-
-# Probe a match's event count without pulling every event.
-curl "http://localhost:8000/api/v1/matches/events?match_id=<uuid>&page_size=1"
-```
-
-Responses are `{items, page, page_size, total, pages}`.
-
-Each `tool_call` event's `result` carries the acting side's remaining `credits`
-after that call — the same number the Engine put on the agent's `ToolResult` —
-so a reader can watch each side's economy move through a match without
-recomputing it from the end-of-match stats. It also carries `stderr` whenever
-the command wrote any, including when `success` is `true`: a shell reports the
-exit code of its last line only, so a compound command whose earlier line was
-refused still lands green, and stderr is the only record of that. Both fields
-are absent on events recorded before they existed, and on event types that are
-not tool calls.
-
+Observability tests use an in-memory OTel exporter, so no network, no sandbox,
+and no real LLM calls.

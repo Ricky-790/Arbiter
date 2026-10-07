@@ -47,14 +47,11 @@ def configure_observability(
         service_name=service_name,
         service_version=service_version or os.getenv("SERVICE_VERSION"),
         environment=environment or os.getenv("DEPLOYMENT_ENVIRONMENT", "dev"),
-        send_to_logfire=bool(int(os.getenv("ENABLE_LOGFIRE_TRACING", "0"))),
-        # No custom scrubbing callback. Logfire's default patterns include
-        # ``password``, ``secret`` and ``api[._ -]?key``, and a callback that
-        # returns the matched value unchanged replaces it with itself -- which
-        # silently turns that default off. Telemetry must never carry an API
-        # key (see this package's AGENTS.md), so the default is the safe one.
-        # Customise only by adding patterns or redacting further, never by
-        # returning the value.
+        send_to_logfire=(
+            "if-token-present"
+            if bool(int(os.getenv("ENABLE_LOGFIRE_TRACING", "0")))
+            else False
+        ),
     )
 
     logfire.instrument_pydantic_ai(include_content=True)
