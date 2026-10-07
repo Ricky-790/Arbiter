@@ -37,6 +37,13 @@ SANDBOX_WAIT_SECONDS = 1800.0
 SANDBOX_RETRY_INITIAL_DELAY_SECONDS = 5.0
 SANDBOX_RETRY_MAX_DELAY_SECONDS = 30.0
 
+#: How long between process polls while a trap or auto-kill rule is armed.
+#: Processes are watched by polling ``ps``, so one that starts *and* exits
+#: inside this window is never observed and cannot fire a trap. That is a
+#: limitation of polling rather than a bug to tune away: a shorter interval
+#: buys detection at the cost of a ``ps`` per interval for the whole match.
+PROCESS_POLL_SECONDS = 0.5
+
 
 class SandboxManager:
     """Shared sandbox infrastructure and concrete execution boundary for tools."""
@@ -313,14 +320,24 @@ class SandboxManager:
 
     @staticmethod
     def _tool_result(result: CommandResult) -> ToolResult:
+        """Map a provider command result onto a ``ToolResult``.
+
+        ``success`` follows the command's exit code, which a multi-line shell
+        script reports from its *last* line only. So stderr is carried on its
+        own field regardless of the exit code: a command whose first line was
+        refused can still exit zero because its last line worked, and dropping
+        the stderr there hides exactly the failure the agent needs to see.
+        ``error`` keeps its old meaning -- the failure reason, present only
+        when the command failed -- so nothing that reads it changes.
+        """
         return ToolResult(
             success=result.ok,
             output=result.stdout,
             error=(result.stderr or f"Command exited with code {result.exit_code}")
             if not result.ok
             else None,
+            stderr=result.stderr or None,
             exit_code=result.exit_code,
-            metadata={"stderr": result.stderr} if result.stderr else {},
         )
 
     def _ensure_process_monitor(self, match_id: str) -> None:
@@ -331,7 +348,26 @@ class SandboxManager:
             )
 
     async def _poll_processes(self, match_id: str) -> None:
+        """Watch the process table for starts, until the sandbox goes away.
+
+        The first poll is a **baseline, not an event**. This task is created by
+        the tool that arms a trap, so its first poll runs immediately after the
+        Warden armed it: treating everything already running as newly started
+        made a ``watch_process`` trap fire on a process that was up before the
+        trap existed. That is a report that the process *exists*, not that
+        anything happened to it, and it made the trap useless for the one thing
+        it is for -- catching a process that starts again.
+
+        The two rules then differ on purpose, and the asymmetry is the point:
+
+        * ``auto_kill`` means "this process must not run", so on the baseline it
+          covers whatever is already up as well. Otherwise a process that is
+          running and never restarts would never be killed at all.
+        * ``watch_process`` reports a *start*, so it only ever looks at what
+          appeared after the baseline.
+        """
         seen: set[tuple[int, str]] = set()
+        first_poll = True
         try:
             while match_id in self.sandboxes:
                 result = await self.client.exec_command(
@@ -340,17 +376,20 @@ class SandboxManager:
                     user="root",
                 )
                 current = self._parse_processes(result)
-                new_processes = current - seen
+                started = current - seen
                 seen = current
                 monitor = self._monitors.get(match_id)
                 watched = self._process_watches.get(match_id, set())
                 auto_kill = self._auto_kill_rules.get(match_id, set())
-                for pid, process in new_processes:
+                for pid, process in current if first_poll else started:
                     if process in auto_kill:
                         await self.kill_process(match_id=match_id, pid=pid)
-                    if process in watched and monitor is not None:
-                        await monitor.publish_process_started(pid, process)
-                await asyncio.sleep(0.5)
+                if not first_poll:
+                    for pid, process in started:
+                        if process in watched and monitor is not None:
+                            await monitor.publish_process_started(pid, process)
+                first_poll = False
+                await asyncio.sleep(PROCESS_POLL_SECONDS)
         except asyncio.CancelledError:
             raise
         except Exception:

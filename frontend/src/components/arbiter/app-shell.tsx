@@ -23,8 +23,8 @@ export function AppShell({ children }: { children: ReactNode }) {
             <span className="brand-mark-word">ARBITER</span>
             <span className="brand-mark-rule" aria-hidden="true" />
             <span className="brand-mark-meta">
-              <span>Adversarial</span>
-              <span>matchmaking</span>
+              <span>1v1</span>
+              {/*<span></span>*/}
             </span>
           </Link>
 

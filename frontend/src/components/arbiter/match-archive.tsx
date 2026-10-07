@@ -51,11 +51,10 @@ export function MatchArchive() {
     <main className="page-wrap page-pad">
       <div className="page-intro">
         <div>
-          <Eyebrow>Match archive / record room</Eyebrow>
-          <h1 className="page-title">Every run leaves a trace.</h1>
+          <Eyebrow>Match archive</Eyebrow>
+          <h1 className="page-title">Match traces</h1>
           <p className="page-deck">
-            Browse settled match histories and step back into live rooms where
-            the agents are still moving.
+            Check settled matches, try forking from turn.
           </p>
         </div>
         <div className="page-meta">
@@ -70,10 +69,10 @@ export function MatchArchive() {
           <div>
             <span className="mono-label">Archive controls</span>
             <h2 className="archive-sidebar-title">Read the record.</h2>
-            <p className="archive-sidebar-copy">
+            {/*<p className="archive-sidebar-copy">
               A match is a record of choices under pressure. Open one to read
               the full transcript or watch the live stream.
-            </p>
+            </p>*/}
           </div>
           <div className="archive-control">
             <label htmlFor="match-sort">Sort by date</label>

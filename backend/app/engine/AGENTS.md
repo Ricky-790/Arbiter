@@ -319,6 +319,62 @@ users, privileges, challenge files, and the `setup_script`'s services — so a
 challenge edited after a snapshot exists will still be served in its old form to
 forks built from that snapshot.
 
+## Running out of credits
+
+Credits are the Prisoner's budget for acting on the challenge. When the Prisoner
+asks for a tool it cannot afford, the match **ends there** with the Warden as the
+winner and `end_reason = PRISONER_OUT_OF_CREDITS` ("Prisoner out of usable
+credits"), rather than the call being rejected and play continuing.
+
+Waiting would reach the same Warden win by wall-clock timeout, having spent the
+rest of the match watching an agent with nothing left to do. Ending at the
+moment it is demonstrated says why.
+
+Two things this rule deliberately does not do:
+
+- **It does not touch free tools.** `can_afford` is `credits >= cost`, so a
+  Prisoner on zero can still `read_file`, `write_file`, `write_to_scratchpad`
+  and — importantly — `submit_flag`, which costs nothing. A Prisoner that has
+  found the answer can still use it; the end only comes from reaching for
+  something it cannot pay for.
+- **It is not the Warden's rule.** A broke Warden is rejected and play
+  continues. The sides are not symmetric: the Prisoner's credits are its budget
+  for the objective, so being out is the end of its game. Do not "fix" the
+  asymmetry without deciding what a Warden that cannot act is meant to mean.
+
+It is also **skipped while replaying** (`_replay_mode`). The fork worker rebuilds
+a sandbox through this same `execute_tool_call()` path, and finishing there
+would stop the replay itself: every later call would come back
+`match_not_running` and the snapshot would be rebuilt wrong.
+
+### Both sides are told their balance
+
+The Engine attaches the actor's remaining credits to **every** `ToolResult` it
+returns, in `execute_tool_call()` via `_with_credit_balance()`, after the call
+has run so a charged action reports what is left. Rejections carry it too —
+`insufficient_credits`, `cooldown`, `tool_not_found` — because a refusal is
+exactly when the number matters. The deferred executor hands the same result to
+the model, so the balance lands in the model's tool-call conversation. Each
+tool's price is on its model-facing description, generated from `ToolCost`
+(`app/agents/AGENTS.md`).
+
+The balance deliberately does **not** ride on the turn prompt. A match agent
+issues tool call after tool call inside a single run; `_turn_prompt()` is
+written once at the top of that run and never refreshed, so a number there is
+stale from the first charge onward. The tool result is the one channel refreshed
+per action. `run_turn()` takes no credits argument for that reason —
+`_agent_loop()` no longer reads the balance and passes it.
+
+That is what makes the rule above fair rather than arbitrary: the Prisoner can
+see what it has and what things cost, so running out is a decision it made
+badly, not arithmetic it was never shown. The Engine remains the only thing that
+decides affordability — the number on the result is context, never authority.
+
+The same balance is written into the persisted `tool_call` row's `result`, so
+`GET /matches/events` reports the economy alongside each action. `_with_credit_balance()`
+sets it, and nothing else may: a tool that could set its own balance could lie
+about it.
+
 ## Win condition
 
 For read-secret:
@@ -362,13 +418,31 @@ rules -- not in the tool and not in `SandboxManager`.
 Only the **head** is kept, so aiming a command at something larger reveals no
 more than a small one. The result carries a truncation marker and a `notice`
 saying how much was dropped, so the Prisoner never reasons from output it does
-not know is incomplete.
+not know is incomplete. `stdout` and `stderr` are each capped; ``error`` is only
+capped separately when it is not simply a copy of the stderr, so a failed
+command's cut characters are counted once, not twice.
 
 The Warden is deliberately exempt: its shell output is its own diagnostics for
 the defence it is running, and this is a Prisoner-side balance rule, not a
 shared transfer limit. The constant lives in the tool layer
 (`agents/tools/shell.py`) only because the model-facing description quotes the
 number; the Engine is what enforces it.
+
+## stderr on a successful call
+
+Every persisted `tool_call` row carries `stderr` from the sandbox, not just the
+`error` summary. `SandboxManager` sets `success` from the command's exit code,
+and a shell reports only its **last** line's status -- so a compound command
+whose first line failed can still be green. `error` is deliberately `None` on a
+zero exit (it is the failure reason, and code reads it that way), which means
+stderr on its own field is the only record that the earlier line was refused.
+The model reads it through the tool return and the archive reads it through
+`GET /matches/events`.
+
+Never "fix" this by flipping `success` to False whenever stderr is non-empty:
+plenty of successful commands write warnings to stderr, and that would report
+real work as failure.
+
 
 ## Scratchpad
 

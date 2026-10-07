@@ -12,7 +12,7 @@ from app.agents.tools import (
     ToolResult,
 )
 from app.engine import Engine, MatchStatus
-from app.engine.engine import WARDEN_SUDOERS_PATH
+from app.engine.engine import PRISONER_OUT_OF_CREDITS, WARDEN_SUDOERS_PATH
 from app.engine.models import utc_now
 from app.sandbox.models import ChallengeSpec, SandboxEvent, SandboxEventType
 
@@ -388,6 +388,144 @@ class AgentUnavailableTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(engine.state.winner, AgentType.PRISONER)
         self.assertIn("not available", engine.state.end_reason or "")
         self.assertEqual(manager.destroyed_match_id, "match-1")
+
+
+class PrisonerOutOfCreditsTests(unittest.IsolatedAsyncioTestCase):
+    """Being unable to pay for an action ends the match for the Prisoner.
+
+    Credits are the Prisoner's budget for working on the challenge, so a
+    Prisoner that cannot afford the action it just chose has nothing left to
+    play with. Ending at that moment is deliberate: the alternative is the wall
+    clock running out, which is the same Warden win reached by watching an agent
+    that can no longer do anything.
+    """
+
+    def make_engine(self) -> Engine:
+        return Engine(
+            match_id="match-broke",
+            challenge=ChallengeSpec(
+                name="test",
+                description="test",
+                flag={"value": "ARB{flag}"},
+                flag_structure={"value": "str"},
+            ),
+            sandbox_manager=FakeSandboxManager(),
+            # Pacing must not be what decides whether the call reaches the
+            # credit check.
+            cooldown_seconds=0,
+        )
+
+    async def bash(self, engine: Engine, *, credits: int) -> ToolResult:
+        engine.state.prisoner.credits = credits
+        return await engine.execute_tool_call(
+            AgentType.PRISONER, ToolCall(name="bash", arguments={"command": "id"})
+        )
+
+    async def test_a_charged_tool_the_prisoner_cannot_pay_for_ends_the_match(
+        self,
+    ) -> None:
+        engine = self.make_engine()
+        await engine.start()
+
+        result = await self.bash(engine, credits=1)  # bash costs 2
+
+        self.assertFalse(result.success)
+        self.assertEqual(engine.state.status, MatchStatus.FINISHED)
+        self.assertEqual(engine.state.winner, AgentType.WARDEN)
+        self.assertEqual(engine.state.end_reason, PRISONER_OUT_OF_CREDITS)
+
+    async def test_the_finish_is_recorded_for_spectators_and_the_reviewer(
+        self,
+    ) -> None:
+        engine = self.make_engine()
+        await engine.start()
+
+        await self.bash(engine, credits=0)
+
+        finished = [
+            event
+            for event in engine.state.events
+            if event.get("type") == "match_finished"
+        ][-1]
+        self.assertEqual(finished["end_reason"], PRISONER_OUT_OF_CREDITS)
+        self.assertEqual(finished["winner"], "warden")
+
+    async def test_an_affordable_tool_does_not_end_anything(self) -> None:
+        engine = self.make_engine()
+        await engine.start()
+
+        result = await self.bash(engine, credits=2)
+
+        self.assertTrue(result.success)
+        self.assertEqual(engine.state.status, MatchStatus.RUNNING)
+        self.assertEqual(engine.state.prisoner.credits, 0)
+
+    async def test_a_free_tool_is_still_usable_with_no_credits(self) -> None:
+        """Nothing to pay for means nothing to be out of."""
+        engine = self.make_engine()
+        await engine.start()
+        engine.state.prisoner.credits = 0
+
+        result = await engine.execute_tool_call(
+            AgentType.PRISONER,
+            ToolCall(name="read_file", arguments={"path": "/challenge/README.md"}),
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(engine.state.status, MatchStatus.RUNNING)
+
+    async def test_a_broke_prisoner_can_still_submit_a_flag(self) -> None:
+        """``submit_flag`` costs nothing, so a found flag is not thrown away.
+
+        The end only happens when the Prisoner actually reaches for something it
+        cannot pay for.
+        """
+        engine = self.make_engine()
+        await engine.start()
+        engine.state.prisoner.credits = 0
+
+        await engine.execute_tool_call(
+            AgentType.PRISONER,
+            ToolCall(name="submit_flag", arguments={"response": {"value": "ARB{flag}"}}),
+        )
+
+        self.assertEqual(engine.state.winner, AgentType.PRISONER)
+
+    async def test_a_broke_warden_is_only_rejected(self) -> None:
+        """The rule is the Prisoner's, and the asymmetry is intentional.
+
+        The Warden running dry stops it acting, but it is not the side working
+        against a budget to complete the challenge -- and ending the match would
+        award the Prisoner a win for the Warden's spending, which is not what
+        running out means for that side.
+        """
+        engine = self.make_engine()
+        await engine.start()
+        engine.state.warden.credits = 0
+
+        result = await engine.execute_tool_call(
+            AgentType.WARDEN, ToolCall(name="bash", arguments={"command": "id"})
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.metadata["failure_category"], "insufficient_credits")
+        self.assertEqual(engine.state.status, MatchStatus.RUNNING)
+
+    async def test_a_replayed_call_cannot_end_a_fork_rebuild(self) -> None:
+        """The fork worker rebuilds a sandbox through this same path.
+
+        Finishing there would stop the *replay*: every later call would come
+        back ``match_not_running`` and the snapshot would be rebuilt wrong.
+        """
+        engine = self.make_engine()
+        await engine.start()
+        engine.begin_replay()
+
+        result = await self.bash(engine, credits=0)
+
+        self.assertFalse(result.success)
+        self.assertEqual(engine.state.status, MatchStatus.RUNNING)
+        self.assertIsNone(engine.state.end_reason)
 
 
 class SideStatsTests(unittest.IsolatedAsyncioTestCase):

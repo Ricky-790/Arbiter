@@ -90,11 +90,11 @@ export function ForkDialog({
         </dl>
 
         <p className="fork-dialog-note">
-          <GitBranch className="size-3.5" />
-          <span>
+          {/*<GitBranch className="size-3.5" />*/}
+          {/*<span>
             Forking a match whose agent ran on a bring-your-own-key model is not
             possible, because the fork has no key to spend.
-          </span>
+          </span>*/}
         </p>
 
         {error !== null && <p className="fork-dialog-error">{error}</p>}

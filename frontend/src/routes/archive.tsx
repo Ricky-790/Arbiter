@@ -52,7 +52,9 @@ function ArchivePage() {
       <div className="page-intro">
         <div>
           <Eyebrow>Archive / strategies and forks</Eyebrow>
-          <h1 className="page-title">What previous matches left behind.</h1>
+          <h1 className="page-title">
+            Public archive of saved strategies / fork points
+          </h1>
           <p className="page-deck">
             Strategies are the approaches worth keeping — one agent&apos;s
             wording, promoted out of the match that produced it. Forks are whole

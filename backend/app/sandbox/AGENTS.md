@@ -61,6 +61,14 @@ Do not add another generic `SandboxExecution` layer. `SandboxManager` already pr
 
 A single `SandboxManager` can be shared by multiple Engine instances in one worker process. It is not a distributed singleton.
 
+`_tool_result` is the one place a provider `CommandResult` becomes a
+`ToolResult`. `success` comes from the exit code, but stderr is carried on its
+own `stderr` field **regardless of that code**: a shell reports only its last
+line's exit status, so a script whose first line was refused can still exit
+zero, and dropping the stderr on success hides the failure from both the model
+and the archive. `error` stays the failure reason and remains `None` on a zero
+exit, so nothing that reads it changes.
+
 ### `monitor.py`
 
 Handles sandbox monitoring and converts observed sandbox changes into callbacks/events.

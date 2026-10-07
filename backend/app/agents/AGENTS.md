@@ -136,8 +136,32 @@ The model should not receive internal fields such as:
 - `match_id`
 - sandbox user identity
 - Engine state
-- credit balance unless intentionally exposed as game information
 - internal execution context
+
+The one deliberate exception is the **credit balance**, which is game
+information rather than an internal field: it decides what an agent can do, and
+for the Prisoner a misjudged spend is fatal. It reaches the model two ways, and
+they only work as a pair:
+
+- `ToolResult.credits` carries the balance the Engine attached to the result the
+  agent just read. It is on *every* result, executed or rejected, because the
+  agent spends almost a whole turn issuing tool call after tool call inside one
+  run — a prompt is written once at the top of that run and never refreshed, so
+  a balance carried there would be stale from the first charge onward. It is
+  Engine-owned data on the result, not something a tool sets, and it is `None`
+  only for the reviewer, which has no economy.
+- `_build_tool_definitions()` appends `Costs N credits.` to every tool that has
+  a `ToolCost`. It is derived from the cost rather than written into each
+  description, so what the model is told and what the Engine charges cannot
+  drift. Tools with no `cost` attribute at all — the reviewer's — get no line.
+
+A balance with no prices is not actionable, and prices with no balance are not
+either. Do not add one without the other, and never hard-code a price into a
+tool description while the note is generated from `BaseTool.cost`.
+
+Do not put the balance back in `_turn_prompt()`. It is context, not authority —
+the Engine still decides what is affordable — and the prompt is the wrong
+channel for a number that changes between two tool calls within one run.
 
 ## Tool results
 

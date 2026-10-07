@@ -172,6 +172,21 @@ def _function_signature_to_json_schema(tool: Any) -> dict[str, Any]:
     }
 
 
+def _cost_note(tool: Any) -> str:
+    """The price line appended to a match tool's model-facing description.
+
+    Derived from ``BaseTool.cost`` instead of written into each description by
+    hand, so the price the model is told and the price the Engine charges cannot
+    drift apart. The reviewer's tools carry no ``cost`` at all -- there is no
+    economy in a review -- and get no line.
+    """
+    cost = getattr(tool, "cost", None)
+    if cost is None:
+        return ""
+    credits = int(cost)
+    return "Costs no credits." if credits == 0 else f"Costs {credits} credits."
+
+
 def _build_tool_definitions(
     registry: ToolRegistry, allowed_tools: set[str]
 ) -> list[ToolDefinition]:
@@ -181,10 +196,14 @@ def _build_tool_definitions(
             tool = registry.get(name)
         except KeyError:
             continue
+        description = tool.description
+        note = _cost_note(tool)
+        if note:
+            description = f"{description} {note}"
         tool_defs.append(
             ToolDefinition(
                 name=tool.name,
-                description=tool.description,
+                description=description,
                 parameters_json_schema=_function_signature_to_json_schema(tool),
                 kind="external",
             )
@@ -337,6 +356,14 @@ class ToolChoosingAgent:
 
     def _turn_prompt(self, scratchpad: str) -> str:
         """The user prompt for one turn of a match-playing agent.
+
+        The agent's credit balance is deliberately not here. A match agent
+        spends almost a whole turn issuing tool call after tool call inside a
+        single run, and this prompt is written once at the top of that run --
+        the number would be stale from the first charge onward. The balance
+        rides on every tool result instead (``ToolResult.credits``), which is
+        the one channel that is refreshed per action. The price of each tool is
+        in that tool's own description (see :func:`_cost_note`).
 
         Overridden by agents that are not playing a match and so have no
         objective or scratchpad to work toward.

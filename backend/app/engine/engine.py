@@ -55,6 +55,19 @@ PRIVATE_PRISONER_TOOLS = frozenset(
     {"submit_flag", "write_to_scratchpad", "read_scratchpad"}
 )
 
+#: Recorded as the end reason when the Prisoner asks for a tool it cannot pay
+#: for. Credits are the Prisoner's budget for acting on the challenge, so a
+#: Prisoner that cannot afford the action it just chose is out of the match:
+#: the alternative is a long slide to the wall-clock timeout, which is a Warden
+#: win anyway, reached by watching an agent that can no longer do anything.
+#:
+#: Only a tool that *costs* something can get here. A free tool (``read_file``,
+#: ``write_file``, ``write_to_scratchpad``, and ``submit_flag`` at zero) is
+#: always affordable, so a Prisoner on nothing with the flag already in hand can
+#: still submit it -- if it spends its last action on a charged tool instead,
+#: that is the end.
+PRISONER_OUT_OF_CREDITS = "Prisoner out of usable credits"
+
 #: Longest rendered tool call written to the Prisoner log. Arguments can be
 #: large (a write_file body, for example), so a line is bounded.
 PRISONER_LOG_LINE_LIMIT = 300
@@ -436,9 +449,15 @@ class Engine:
                     "success": False,
                     "exit_code": None,
                     "error": f"Tool execution failed: {error}",
+                    "credits": self._agent_state(actor).credits,
                 },
             )
             raise
+        # The actor reads its balance off every result, so this is where the
+        # number is attached -- after the call, so a spend is reflected, and on
+        # rejections too, which are exactly the moments the balance matters.
+        result = self._with_credit_balance(actor, result)
+        self._agent_state(actor).last_result = result
         # One persisted row per requested tool call, whatever the outcome.
         # A rejection carries its category so the persisted history says *why*
         # the Engine refused; that is what lets a forked match replay the calls
@@ -447,6 +466,14 @@ class Engine:
             "success": result.success,
             "exit_code": result.exit_code,
             "error": result.error,
+            # stderr rides with the row even on success: a shell reports the
+            # exit code of its last line only, so a command whose earlier line
+            # failed can still land green, and the archive would otherwise lose
+            # the only evidence of it.
+            "stderr": result.stderr,
+            # The balance rides with the row so ``GET /matches/events`` can
+            # show the economy moving without recomputing it from stats.
+            "credits": result.credits,
         }
         failure_category = result.metadata.get("failure_category")
         if failure_category is not None:
@@ -519,6 +546,23 @@ class Engine:
             return reject("cooldown", "Tool cooldown is active")
         if not self.credits.can_afford(self.state, actor, tool.cost):
             logger.warning(f"{actor} tool call: Low Credits")
+            # A Prisoner that cannot pay for the action it chose is finished:
+            # credits are its budget for working on the challenge, and it has
+            # none left. Ending here is deliberate rather than waiting out the
+            # wall clock, which is the same Warden win reached by watching an
+            # agent that can no longer act.
+            #
+            # Not while replaying: the fork worker rebuilds a sandbox through
+            # this same path, and finishing there would stop the *replay* --
+            # every later call would be refused as ``match_not_running`` and the
+            # snapshot would be rebuilt wrong.
+            if actor is AgentType.PRISONER and not self._replay_mode:
+                logger.critical(
+                    f"[{actor}] cannot afford {call.name}; ending the match"
+                )
+                self.finish(
+                    winner=AgentType.WARDEN, end_reason=PRISONER_OUT_OF_CREDITS
+                )
             return reject("insufficient_credits", "Insufficient credits")
         if actor is AgentType.WARDEN:
             trap_error = self.traps.validate_arm(self.state, call)
@@ -577,7 +621,6 @@ class Engine:
                     **output_telemetry(result.output),
                 },
             )
-        self._agent_state(actor).last_result = result
         self._record(
             "tool_result",
             actor=actor.value,
@@ -625,13 +668,22 @@ class Engine:
             )
 
         output, dropped_output = cap(result.output or "")
-        error, dropped_error = cap(result.error or "")
-        dropped = dropped_output + dropped_error
+        raw_stderr = result.stderr or ""
+        stderr, dropped_stderr = cap(raw_stderr)
+        raw_error = result.error or ""
+        if raw_error and raw_error == raw_stderr:
+            # ``_tool_result`` sets ``error`` to the stderr on failure, so the
+            # two are the same text. Cap them together and count the cut once.
+            error, dropped_error = stderr, 0
+        else:
+            error, dropped_error = cap(raw_error)
+        dropped = dropped_output + dropped_stderr + dropped_error
         if dropped == 0:
             return result
         return result.model_copy(
             update={
                 "output": output,
+                "stderr": stderr or None,
                 "error": error or None,
                 "notice": (
                     f"bash output for the Prisoner is capped at "
@@ -999,7 +1051,11 @@ class Engine:
             result = await self.execute_tool_call(actor, call)
         except Exception as error:
             logger.exception(f"[{actor}] tool execution raised")
-            result = ToolResult(success=False, error=f"Tool execution failed: {error}")
+            result = ToolResult(
+                success=False,
+                error=f"Tool execution failed: {error}",
+                credits=self._agent_state(actor).credits,
+            )
         logger.info(
             f"ToolResult[{actor}]: success={result.success}, output={result.output}, error={result.error}, metadata={result.metadata}"
         )
@@ -1104,6 +1160,17 @@ class Engine:
 
     def _agent_state(self, actor: AgentType):
         return self.state.prisoner if actor is AgentType.PRISONER else self.state.warden
+
+    def _with_credit_balance(self, actor: AgentType, result: ToolResult) -> ToolResult:
+        """Return ``result`` carrying the actor's remaining credits.
+
+        Read after the call, so a charged action reports what is left rather
+        than what it started with. Attached here rather than by a tool for the
+        same reason credits are deducted here: the balance is an Engine rule,
+        and a tool that could set it could lie about it. Both sides get it --
+        the Warden's economy is not the Prisoner's, but it is still an economy.
+        """
+        return result.model_copy(update={"credits": self._agent_state(actor).credits})
 
     def _record(self, event_type: str, **details: object) -> dict[str, Any]:
         event = {"type": event_type, "timestamp": utc_now(), **details}

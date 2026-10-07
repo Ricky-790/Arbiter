@@ -63,6 +63,10 @@ celery_app.conf.update(
     task_routes={CREATE_FORK_TASK: {"queue": FORK_QUEUE}},
     broker_use_ssl={
         "ssl_cert_reqs": ssl.CERT_NONE  # Disables strict CA validation check
-    },
-    redis_backend_use_ssl={"ssl_cert_reqs": ssl.CERT_NONE},
+    }
+    if redis_url().startswith("rediss://")
+    else None,
+    redis_backend_use_ssl={"ssl_cert_reqs": ssl.CERT_NONE}
+    if redis_url().startswith("rediss://")
+    else None,
 )

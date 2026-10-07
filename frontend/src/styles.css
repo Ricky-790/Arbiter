@@ -534,7 +534,7 @@
     align-items: center;
     gap: clamp(2rem, 7vw, 8rem);
     border-bottom: 1px solid var(--color-border);
-    padding-block: clamp(4.5rem, 10vw, 9rem);
+    padding-block: clamp(4.5rem, 1vw, 9rem);
   }
 
   .home-hero::before {

@@ -170,3 +170,13 @@ curl "http://localhost:8000/api/v1/matches/events?match_id=<uuid>&page_size=1"
 
 Responses are `{items, page, page_size, total, pages}`.
 
+Each `tool_call` event's `result` carries the acting side's remaining `credits`
+after that call — the same number the Engine put on the agent's `ToolResult` —
+so a reader can watch each side's economy move through a match without
+recomputing it from the end-of-match stats. It also carries `stderr` whenever
+the command wrote any, including when `success` is `true`: a shell reports the
+exit code of its last line only, so a compound command whose earlier line was
+refused still lands green, and stderr is the only record of that. Both fields
+are absent on events recorded before they existed, and on event types that are
+not tool calls.
+

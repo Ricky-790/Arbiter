@@ -127,7 +127,13 @@ async def list_match_events(
     sort: Literal["date_asc", "date_desc"] = Query("date_asc"),
     session: AsyncSession = Depends(get_session),
 ) -> MatchEventListResponse:
-    """Return one page of a single match's persisted events, oldest first."""
+    """Return one page of a single match's persisted events, oldest first.
+
+    ``result`` is served as stored. For a ``tool_call`` row that includes the
+    acting side's remaining ``credits`` after the call -- attached by the
+    Engine when it built the same ``ToolResult`` the agent read -- so a caller
+    can follow the economy through the match without recomputing it.
+    """
     if await session.get(Match, match_id) is None:
         raise HTTPException(status_code=404, detail="Match not found")
     events, total = await match_events_service.get_match_events(
@@ -431,8 +437,7 @@ async def start_from_fork(
         raise HTTPException(
             status_code=409,
             detail=(
-                f"Fork {fork.id} is {fork.status}; it can only be started once "
-                "its snapshot is ready"
+                f"Fork {fork.id} is {fork.status}; it can only be started once its snapshot is ready"
             ),
         )
 

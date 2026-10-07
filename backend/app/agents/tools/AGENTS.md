@@ -105,6 +105,20 @@ This is intentional and must be preserved during refactoring.
 
 A tool's cost must never be enforced inside the tool implementation.
 
+### The price is in the description, and generated
+
+`_build_tool_definitions()` appends `Costs N credits.` (or `Costs no credits.`)
+to every tool that carries a `ToolCost`, so the model can budget against the
+balance that arrives on every tool result (`ToolResult.credits`). It is derived
+from `cost` rather than written into the description: the two cannot drift, and
+a new tool gets a price line without anyone remembering to add one.
+
+Never hard-code a price into a tool's `description` — that is a second,
+silently-wrong copy of a number the Engine charges from. The reviewer's tools
+(`review_tools/`) do not subclass `BaseTool` and have no `cost` at all, so they
+get no line; `_cost_note` keys off the attribute being absent, not off it being
+zero.
+
 ## `bash` output cap
 
 `PRISONER_BASH_OUTPUT_CHARS` (4000) lives in `shell.py` next to the `bash`
@@ -180,6 +194,19 @@ Preserve:
 Do not turn failed commands into successful results.
 
 Do not put hidden reasoning into `ToolResult`.
+
+`ToolResult.credits` is the one field a tool must not set. The Engine attaches
+the acting side's remaining balance to every result it returns, after the call
+has run (`app/engine/AGENTS.md`), and a tool that filled it in would be
+reporting a number it does not own. The reviewer's tools leave it `None`,
+because a review has no economy.
+
+`stderr` is separate from `error`, and deliberately kept on a successful call.
+A shell runs every line of a command whether or not an earlier one failed, so
+the exit code — and so `success` — is only the last line's. `error` stays the
+failure reason and is `None` when the command exited zero; `stderr` is the raw
+stream either way. Dropping it on success hides a refused `sudo` behind a
+trailing `ls` that worked, which is exactly the case this field exists for.
 
 ## Registry
 

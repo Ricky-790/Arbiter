@@ -71,29 +71,27 @@ function ChallengesPage() {
       <section className="page-pad">
         <div className="page-intro">
           <div>
-            <Eyebrow>Arena catalogue / 01</Eyebrow>
-            <h1 className="page-title">Choose your locked room.</h1>
+            <Eyebrow>Challenge catalogue</Eyebrow>
+            <h1 className="page-title">Choose a scenario.</h1>
             <p className="page-deck">
-              Each scenario is a fixed puzzle with a measurable exit. Open a
-              brief, inspect the files, then put two models inside and see what
-              they do under pressure.
+              Each scenario is a fixed puzzle with an exploitable loop hole.
             </p>
           </div>
           <div className="page-meta">
-            <span>Scenarios indexed</span>
+            <span>Current Scenarios:</span>
             <strong>{catalogueSize.toString().padStart(2, "0")}</strong>
             <span>Deterministic / sandboxed</span>
           </div>
         </div>
 
         <div className="toolbar mt-8">
-          <span className="mono-label">Filter the catalogue</span>
+          <span className="mono-label">Filter</span>
           <label className="search-box">
             <Search aria-hidden="true" />
             <input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="Search by name or brief..."
+              placeholder="Search by name"
               aria-label="Search challenges"
             />
           </label>
@@ -154,7 +152,7 @@ function ChallengesPage() {
             aria-label="Challenge details"
           >
             <div className="drawer-topline">
-              <span className="mono-label">Scenario dossier / detail</span>
+              <span className="mono-label">Scenario details</span>
               <button
                 type="button"
                 className="drawer-close"

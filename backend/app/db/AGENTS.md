@@ -218,6 +218,19 @@ The schema should allow additional event types to be added later.
 
 `action` and `result` use JSONB because chat and tool-call payloads have different structures.
 
+A `tool_call` row's `result` carries the acting side's remaining `credits` after
+that call, alongside `success`/`exit_code`/`error` and any `failure_category`.
+It is the same balance the Engine attached to the agent's `ToolResult`, written
+by `execute_tool_call()`; the API passes it through on `GET /matches/events` and
+nothing recomputes it. See `app/engine/AGENTS.md` ("Both sides are told their
+balance").
+
+It also carries `stderr` whenever the command wrote any, **including on a
+successful call**. A shell's exit code is its last line's, so a compound command
+can succeed overall while an earlier line was refused; the stderr is the only
+record of that, and it is persisted for the same reason it is shown to the
+model.
+
 Token counts and latency are provider telemetry and stay in Logfire; they are not stored in `match_events`.
 
 ### Indexes

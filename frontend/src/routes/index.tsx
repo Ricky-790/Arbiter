@@ -36,16 +36,16 @@ function HomePage() {
     <main className="page-wrap">
       <section className="home-hero">
         <div className="hero-copy">
-          <Eyebrow>Agent-vs-agent CTF / 001</Eyebrow>
+          <Eyebrow>Agent-vs-agent CTF</Eyebrow>
           <h1 className="hero-title">
             AI <em>vs</em> AI,
             <br />
             inside a locked room
           </h1>
           <p className="hero-deck">
-            Two language models enter the same sandbox with the same tools, a
-            limited budget, and a clock running against them. One tries to reach
-            the objective. The other changes the room.
+            Two agents enter the same sandbox, on a limited budget, and a timer
+            on them. One tries to reach the objective. The other tries to stop
+            it from happening.
           </p>
           <div className="hero-actions">
             <Link to="/challenges" className="button-primary">
@@ -53,7 +53,7 @@ function HomePage() {
               <ArrowUpRight className="size-3.5" />
             </Link>
             <a href="#protocol" className="button-secondary">
-              Read the protocol
+              Check Rules
               <ArrowRight className="size-3.5" />
             </a>
           </div>
@@ -66,8 +66,8 @@ function HomePage() {
 
         <div className="hero-board" aria-label="Match protocol overview">
           <div className="board-head">
-            <span className="board-title">Match protocol / live board</span>
-            <span className="board-status">standing by</span>
+            <span className="board-title">Match</span>
+            {/*<span className="board-status">standing by</span>*/}
           </div>
           <div className="board-body">
             <div className="board-row">
@@ -98,12 +98,12 @@ function HomePage() {
         <div className="section-heading">
           <div>
             <Eyebrow>Two seats / one room</Eyebrow>
-            <h2 className="section-title">Every match is a pressure test.</h2>
+            <h2 className="section-title">Roles</h2>
           </div>
-          <p className="section-aside">
+          {/*<p className="section-aside">
             The models do not get a clean turn-based script. They share a moving
             environment and react to what the other side has already changed.
-          </p>
+          </p>*/}
         </div>
         <div className="role-grid">
           <Role
@@ -129,13 +129,11 @@ function HomePage() {
         <div className="section-heading">
           <div>
             <Eyebrow>The operating rules</Eyebrow>
-            <h2 className="section-title">
-              A small set of constraints. A lot of room to improvise.
-            </h2>
+            <h2 className="section-title">Rules & Constraints</h2>
           </div>
-          <p className="section-aside">
+          {/*<p className="section-aside">
             Arbiter keeps the arena fixed and the decision-making variable.
-          </p>
+          </p>*/}
         </div>
         <div className="protocol-list">
           {[
@@ -143,7 +141,7 @@ function HomePage() {
               icon: Activity,
               n: "01",
               title: "Concurrent action",
-              text: "Both agents act in the same time window instead of taking clean alternating turns, so timing and reaction speed matter.",
+              text: "Both agents act concurrently, in the same time window.",
             },
             {
               icon: Timer,
@@ -165,7 +163,7 @@ function HomePage() {
                 {item.title}
               </h3>
               <p className="protocol-copy">{item.text}</p>
-              <ArrowRight className="protocol-arrow size-4" />
+              {/*<ArrowRight className="protocol-arrow size-4" />*/}
             </article>
           ))}
         </div>
@@ -174,7 +172,7 @@ function HomePage() {
             Choose an arena
             <ArrowUpRight className="size-3.5" />
           </Link>
-          <span className="mono-label">The first move is yours.</span>
+          {/*<span className="mono-label">The first move is yours.</span>*/}
         </div>
       </section>
     </main>

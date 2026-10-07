@@ -123,7 +123,7 @@ export function MatchDetails({ match }: { match: MatchListSchema }) {
   return (
     <main>
       <MatchMasthead
-        eyebrow={`Recorded match / transcript / ${match.id.slice(0, 8)}`}
+        eyebrow={`Recorded match / ${match.id.slice(0, 8)}`}
         title={
           overview?.match.challenge_name ??
           match.challenge_name ??

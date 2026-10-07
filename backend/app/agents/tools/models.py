@@ -47,6 +47,15 @@ class ToolResult(BaseModel):
     success: bool
     output: str = ""
     error: str | None = None
+    #: Raw stderr from a sandbox command, kept even when the call succeeded.
+    #:
+    #: A shell runs every line whether or not the previous one failed, so a
+    #: command's exit code -- and therefore ``success`` -- is only its *last*
+    #: line's. Without this field a script like ``sudo rm ...; ls`` reports
+    #: success and the refused ``sudo`` disappears, because ``error`` is
+    #: cleared whenever the exit code is zero. The model and the archive both
+    #: read this, so a partial failure can no longer masquerade as a clean run.
+    stderr: str | None = None
     exit_code: int | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     notice: str | None = Field(
@@ -56,3 +65,15 @@ class ToolResult(BaseModel):
             "suggestion to use the scratchpad and narrower commands)."
         ),
     )
+    #: The acting side's balance after this call, attached by the Engine.
+    #:
+    #: It rides on the result rather than the turn prompt because a match
+    #: agent spends almost all of its time inside one run, issuing tool call
+    #: after tool call; the prompt is written once at the top of that run and
+    #: never refreshed, so a balance carried there goes stale after the first
+    #: charge. Every result is a fresh reading, including a rejection, so the
+    #: model always has the number its next decision depends on.
+    #:
+    #: Engine-owned: tools never set it, and it is ``None`` for an agent with
+    #: no economy (the Strategy Reviewer).
+    credits: int | None = None
