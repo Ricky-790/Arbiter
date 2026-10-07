@@ -29,20 +29,25 @@ _current_agent_role: ContextVar[str | None] = ContextVar(
 
 
 # Logfire configuration
-
-
 def configure_observability(
     *,
     service_name: str = "arbiter-project",
     service_version: str | None = None,
     environment: str | None = None,
 ) -> None:
-    """Configure Logfire and Pydantic AI instrumentation."""
+    """Configure Logfire and Pydantic AI instrumentation.
+
+    Export is governed by ``ENABLE_LOGFIRE_TRACING`` and is off unless that
+    variable explicitly turns it on. When it is on, ``if-token-present`` keeps a
+    missing token from being fatal: without a token nothing is exported, which is
+    what keeps this safe to enable in an environment that has no credentials.
+    """
 
     logfire.configure(
         service_name=service_name,
         service_version=service_version or os.getenv("SERVICE_VERSION"),
         environment=environment or os.getenv("DEPLOYMENT_ENVIRONMENT", "dev"),
+        send_to_logfire=bool(int(os.getenv("ENABLE_LOGFIRE_TRACING", "0"))),
         # No custom scrubbing callback. Logfire's default patterns include
         # ``password``, ``secret`` and ``api[._ -]?key``, and a callback that
         # returns the matched value unchanged replaces it with itself -- which

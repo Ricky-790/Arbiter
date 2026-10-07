@@ -6,6 +6,8 @@
 
 Arbiter uses Pydantic Logfire with OpenTelemetry.
 
+Tracing is opt-in via `ENABLE_LOGFIRE_TRACING`; see "Tracing is opt-in" below.
+
 The package should:
 
 1. configure Logfire
@@ -165,6 +167,27 @@ sandbox continues
 ```
 
 Telemetry errors should be handled as observability failures, not match failures.
+
+## Tracing is opt-in
+
+Export to logfire.dev is governed by `ENABLE_LOGFIRE_TRACING` and is **off
+unless that variable explicitly turns it on**. An unset variable means off.
+
+This is not just a preference. `logfire.configure()` with no token falls back to
+an interactive terminal prompt, which raises `EOFError` with no TTY — so a
+deployment with no Logfire credentials would otherwise fail at import, in a
+container, before serving anything. Missing credentials must never be a boot
+failure.
+
+When the flag is on, `send_to_logfire` is set to `if-token-present` rather than
+`True`, so an environment that opts in without a token exports nothing instead of
+failing.
+
+Never require a Logfire credential to boot. `tests/test_observability.py`
+guards this by importing the package in a credential-free subprocess.
+
+Local span output still prints to stdout/stderr regardless of the flag, so
+container logs keep their traces either way.
 
 ## V1 scope
 

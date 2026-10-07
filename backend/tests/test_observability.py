@@ -407,3 +407,114 @@ class ScrubbingConfigurationTests(unittest.TestCase):
         from app.observability import logfire as observability
 
         self.assertFalse(hasattr(observability, "scrubbing_callback"))
+
+
+class TracingOptInTests(unittest.TestCase):
+    """Telemetry is opt-in via ``ENABLE_LOGFIRE_TRACING``, and never needs credentials.
+
+    Export used to be on by default, which made a missing ``LOGFIRE_TOKEN`` a
+    boot failure rather than a non-event: Logfire falls back to an interactive
+    terminal prompt when it has no token, and in a container with no TTY that
+    raises ``EOFError`` at import. A deployment with no Logfire configuration
+    must now be a supported, quiet configuration.
+    """
+
+    def test_the_flag_is_read_as_opt_in(self) -> None:
+        from app.observability import logfire as observability
+
+        # Unset is off. Telemetry is opt-in.
+        self.assertFalse(observability.tracing_enabled(None))
+        for off in ("", "0", "false", "FALSE", "no", "off", " off "):
+            with self.subTest(value=off):
+                self.assertFalse(observability.tracing_enabled(off))
+        for on in ("1", "true", "TRUE", " yes ", "on"):
+            with self.subTest(value=on):
+                self.assertTrue(observability.tracing_enabled(on))
+
+    def _send_to_logfire(self, flag: str | None) -> object:
+        """Run ``configure_observability`` with the flag set, return its kwarg."""
+        from unittest.mock import patch
+
+        from app.observability import logfire as observability
+
+        with (
+            patch.dict(
+                "os.environ",
+                {}
+                if flag is None
+                else {observability.TRACING_ENABLED_ENV: flag},
+                clear=True,
+            ),
+            patch.object(observability.logfire, "configure") as configure,
+            patch.object(observability.logfire, "instrument_pydantic_ai"),
+        ):
+            observability.configure_observability()
+
+        return configure.call_args.kwargs["send_to_logfire"]
+
+    def test_export_is_off_unless_the_flag_opts_in(self) -> None:
+        self.assertIs(self._send_to_logfire(None), False)
+        self.assertIs(self._send_to_logfire("false"), False)
+
+    def test_enabling_tracing_tolerates_a_missing_token(self) -> None:
+        # ``if-token-present`` rather than True: a token-less environment that
+        # opts in must export nothing instead of failing to configure.
+        self.assertEqual(self._send_to_logfire("true"), "if-token-present")
+
+    def test_importing_without_credentials_does_not_prompt(self) -> None:
+        """The regression this exists for: a credential-less import must not raise.
+
+        Logfire falls back to an interactive ``IntPrompt`` when it has no token
+        for the requested base URL but finds other cached credentials, which
+        raises ``EOFError`` with no TTY -- i.e. in a container. Reproduced in a
+        child process because Logfire is configured once at import, using a
+        temporary HOME holding two cached tokens so the prompt branch is the one
+        taken, and a CWD outside the repo so no ``.env`` supplies a real token.
+        """
+        import os
+        import subprocess
+        import sys
+        import tempfile
+        import textwrap
+
+        backend_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+        with tempfile.TemporaryDirectory() as home:
+            logfire_dir = os.path.join(home, ".logfire")
+            os.makedirs(logfire_dir)
+            with open(os.path.join(logfire_dir, "default.toml"), "w") as handle:
+                handle.write(
+                    textwrap.dedent(
+                        """
+                        [tokens."https://logfire-us.pydantic.dev"]
+                        token = "pylf_v1_us_00000000000000000000000000000000"
+                        expiration = "2099-01-01T00:00:00.000000Z"
+
+                        [tokens."https://logfire-eu.pydantic.dev"]
+                        token = "pylf_v1_eu_00000000000000000000000000000000"
+                        expiration = "2099-01-01T00:00:00.000000Z"
+                        """
+                    )
+                )
+
+            env = {
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "HOME": home,
+                "PYTHONPATH": backend_root,
+            }
+            result = subprocess.run(
+                [sys.executable, "-c", "import app.observability.logfire"],
+                capture_output=True,
+                text=True,
+                cwd=home,
+                env=env,
+                stdin=subprocess.DEVNULL,
+            )
+
+        self.assertEqual(
+            result.returncode,
+            0,
+            "importing observability without Logfire credentials failed; it "
+            "must not prompt:\n" + result.stderr,
+        )
+        self.assertNotIn("EOFError", result.stderr)
