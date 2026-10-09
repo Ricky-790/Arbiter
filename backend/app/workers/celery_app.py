@@ -52,6 +52,7 @@ celery_app.conf.update(
     task_default_queue=MATCH_QUEUE,
     # A match must not be lost if a worker dies mid-run, and one worker
     # process should only hold one match at a time.
+    worker_enable_remote_control=False,
     task_acks_late=True,
     task_reject_on_worker_lost=True,
     worker_prefetch_multiplier=1,
@@ -62,8 +63,9 @@ celery_app.conf.update(
     # own pool and can neither be starved by nor starve the match queue.
     task_routes={CREATE_FORK_TASK: {"queue": FORK_QUEUE}},
     broker_transport_options={
-        "polling_interval": 60,
+        "polling_interval": 30,
         "unacked_restore_throttle": 60,
+        "health_check_interval": 60,
     },
     broker_use_ssl={
         "ssl_cert_reqs": ssl.CERT_NONE  # Disables strict CA validation check
