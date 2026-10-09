@@ -61,8 +61,9 @@ celery_app.conf.update(
     # Fork building is slower and rarer than hosting a match, so it gets its
     # own pool and can neither be starved by nor starve the match queue.
     task_routes={CREATE_FORK_TASK: {"queue": FORK_QUEUE}},
-    broker_transport_options = {
-        "polling_interval": 15,
+    broker_transport_options={
+        "polling_interval": 60,
+        "unacked_restore_throttle": 60,
     },
     broker_use_ssl={
         "ssl_cert_reqs": ssl.CERT_NONE  # Disables strict CA validation check
