@@ -53,6 +53,7 @@ celery_app.conf.update(
     # A match must not be lost if a worker dies mid-run, and one worker
     # process should only hold one match at a time.
     worker_enable_remote_control=False,
+    worker_send_task_events=False,
     task_acks_late=True,
     task_reject_on_worker_lost=True,
     worker_prefetch_multiplier=1,
