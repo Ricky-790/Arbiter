@@ -59,9 +59,7 @@ async def build_fork(message: ForkCreateMessage) -> dict[str, Any]:
     """
     try:
         spec = await load_fork_spec(message)
-        plan = await plan_fork_build(
-            message.parent_match_id, message.branch_event_id
-        )
+        plan = await plan_fork_build(message.parent_match_id, message.branch_event_id)
         snapshot_id = await build_snapshot(message.parent_match_id, plan, spec)
 
         factory = get_session_factory()

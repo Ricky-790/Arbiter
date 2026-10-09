@@ -82,4 +82,4 @@ ENV ARBITER_SERVICE_NAME=arbiter-worker
 #
 # One match at a time per worker: Solari hosts a single sandbox, and extra
 # matches queue on the broker rather than competing for it.
-CMD ["sh", "-c", "python /app/worker_health.py & exec celery -A app.workers.celery_app worker --queues=${CELERY_QUEUES} --concurrency=1 --loglevel=INFO"]
+CMD ["sh", "-c", "python /app/worker_health.py & exec celery -A app.workers.celery_app worker --queues=${CELERY_QUEUES} --concurrency=1 --loglevel=INFO --without-heartbeat"]
