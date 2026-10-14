@@ -125,7 +125,7 @@ async def list_match_events(
     page: int = Query(1, ge=1),
     page_size: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
     sort: Literal["date_asc", "date_desc"] = Query("date_asc"),
-    # session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session),
 ) -> MatchEventListResponse:
     """Return one page of a single match's persisted events, oldest first.
 
