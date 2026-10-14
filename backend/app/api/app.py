@@ -65,6 +65,15 @@ def allowed_origins() -> list[str]:
     return [raw] if raw else list(DEFAULT_CORS_ORIGINS)
 
 
+import sentry_sdk
+
+sentry_sdk.init(
+    dsn=os.getenv("SENTRY_URI", ""),
+    # Add data like request headers and IP for users,
+    # see https://docs.sentry.io/platforms/python/data-management/data-collected/ for more info
+    send_default_pii=True,
+)
+
 app = FastAPI(title="Arbiter")
 
 
